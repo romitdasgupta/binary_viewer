@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MachOStudio — High-Density Mach-O Binary &amp; Firmware Inspector</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Full-window Drag-and-Drop Overlay -->
+  <div id="dropzone-overlay" class="dropzone-overlay hidden">
+    <div class="dropzone-card">
+      <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="17 8 12 3 7 8" />
+        <line x1="12" y1="3" x2="12" y2="15" />
+      </svg>
+      <div class="dropzone-title">Drop Mach-O Binary, Universal Fat Binary, Dylib, or Firmware Image</div>
+      <div class="dropzone-subtitle">Supports MH_EXECUTE, MH_DYLIB, MH_BUNDLE, MH_OBJECT, MH_PRELOAD, MH_KEXT_BUNDLE &amp; FAT_MAGIC</div>
+    </div>
+  </div>
+
+  <!-- Floating Rich Tooltip for Memory Map Ribbon & Bitflags -->
+  <div id="global-tooltip" class="global-tooltip hidden" role="tooltip"></div>
+
+  <!-- Global Command Palette & Omni-Search Modal (Cmd+K / /) -->
+  <div id="cmdk-modal" class="cmdk-backdrop hidden" role="dialog" aria-modal="true" aria-label="Global Omni-Search">
+    <div class="cmdk-dialog">
+      <div class="cmdk-header">
+        <svg class="cmdk-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="8.5" cy="8.5" r="5.5" />
+          <line x1="13" y1="13" x2="18" y2="18" />
+        </svg>
+        <input
+          id="cmdk-input"
+          type="text"
+          class="cmdk-input"
+          placeholder="Search @symbols, &quot;strings, #load_commands, or hex bytes (e.g. cf fa ed fe / 0x100003f60)..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <span class="kbd-badge">ESC</span>
+      </div>
+      <div class="cmdk-scopes" id="cmdk-scopes">
+        <button class="cmdk-scope-btn active" data-scope="all">All</button>
+        <button class="cmdk-scope-btn" data-scope="symbols"><span class="scope-prefix">@</span>Symbols</button>
+        <button class="cmdk-scope-btn" data-scope="strings"><span class="scope-prefix">"</span>Strings</button>
+        <button class="cmdk-scope-btn" data-scope="structures"><span class="scope-prefix">#</span>Structures &amp; Sections</button>
+        <button class="cmdk-scope-btn" data-scope="hex"><span class="scope-prefix">0x</span>Hex Bytes / Address</button>
+      </div>
+      <div id="cmdk-results" class="cmdk-results">
+        <div class="cmdk-empty">Type to search across symbols, strings, load commands, or raw hex bytes...</div>
+      </div>
+      <div class="cmdk-footer">
+        <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+        <span><kbd>↵</kbd> Jump to Target</span>
+        <span>Prefix <kbd>@</kbd> Symbol <kbd>"</kbd> String <kbd>#</kbd> Struct <kbd>0x</kbd> Addr/Hex</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Full-Viewport Application Shell -->
+  <div class="app-shell">
+    <!-- 1. TOP GLOBAL TOOLBAR (42px) -->
+    <header class="top-toolbar">
+      <div class="brand-cluster">
+        <div class="brand-logo" title="MachOStudio Reverse Engineering Suite">
+          <span class="brand-hex">0xFEEDFACF</span>
+          <span class="brand-name">MachO<span class="brand-accent">Studio</span></span>
+        </div>
+
+        <div class="toolbar-divider"></div>
+
+        <!-- Built-In One-Click Presets -->
+        <div class="presets-group" id="presets-bar" aria-label="Built-in Sample Binaries">
+          <span class="toolbar-label">Presets:</span>
+          <!-- Populated dynamically from /api/presets with immediate fallback pills -->
+          <button class="preset-pill" data-preset-path="fixtures/synthetic_universal" title="Multi-arch test binary with custom segments, C++/ObjC symbols, chained fixups &amp; entitlements">
+            <span class="preset-dot dot-purple"></span>Synthetic Universal
+          </button>
+          <button class="preset-pill" data-preset-path="fixtures/synthetic_firmware.preload" title="Standalone ARM64 MH_PRELOAD firmware image with LC_UNIXTHREAD &amp; RWX segment">
+            <span class="preset-dot dot-amber"></span>Firmware (MH_PRELOAD)
+          </button>
+          <button class="preset-pill" data-preset-path="/bin/ls" title="macOS Universal system utility (arm64e PAC + x86_64)">
+            <span class="preset-dot dot-cyan"></span>/bin/ls
+          </button>
+          <button class="preset-pill" data-preset-path="/usr/bin/true" title="Minimal macOS Universal Mach-O executable">
+            <span class="preset-dot dot-emerald"></span>/usr/bin/true
+          </button>
+        </div>
+      </div>
+
+      <!-- Center Path Input & File Upload -->
+      <div class="file-loader-cluster">
+        <form id="path-load-form" class="path-input-group" autocomplete="off">
+          <svg class="input-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h3.172a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.914 4H12.5A1.5 1.5 0 0 1 14 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9Z" />
+          </svg>
+          <input
+            id="path-input"
+            type="text"
+            class="path-input"
+            placeholder="Local macOS path (e.g. /bin/ls, /usr/lib/dyld)..."
+            value="/bin/ls"
+            spellcheck="false"
+          />
+          <button type="submit" class="btn-toolbar btn-primary" title="Parse file path on disk">Load Path</button>
+        </form>
+
+        <label class="btn-toolbar btn-upload" title="Upload or drag-and-drop any local Mach-O file">
+          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M8 11V2m0 0L4.5 5.5M8 2l3.5 3.5M2.5 13.5h11" />
+          </svg>
+          <span>Open File…</span>
+          <input id="file-upload-input" type="file" class="sr-only" />
+        </label>
+      </div>
+
+      <!-- Right Controls: Architecture Slice Switcher, History, Search, Layout Toggle -->
+      <div class="toolbar-right-cluster">
+        <!-- Navigation Back / Forward -->
+        <div class="nav-history-group">
+          <button id="btn-nav-back" class="btn-icon-only" title="Navigate Back ( [ )" disabled>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="10 3 5 8 10 13"/></svg>
+          </button>
+          <button id="btn-nav-fwd" class="btn-icon-only" title="Navigate Forward ( ] )" disabled>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="6 3 11 8 6 13"/></svg>
+          </button>
+        </div>
+
+        <!-- Architecture Slice Switcher -->
+        <div class="slice-switcher-wrap" title="Active Architecture Slice (Fat/Universal Binary)">
+          <span class="slice-label">Slice:</span>
+          <select id="slice-select" class="slice-select" aria-label="Architecture Slice">
+            <option value="0">Loading…</option>
+          </select>
+        </div>
+
+        <!-- Global Search Trigger (Cmd+K) -->
+        <button id="btn-open-cmdk" class="btn-cmdk" title="Global Omni-Search (Cmd+K or /)">
+          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+            <circle cx="7" cy="7" r="4.5" />
+            <line x1="10.5" y1="10.5" x2="14" y2="14" />
+          </svg>
+          <span>Search…</span>
+          <kbd class="kbd-badge">⌘K</kbd>
+        </button>
+
+        <!-- Hex Dock Split Toggle (Right Split vs Bottom Split) -->
+        <button id="btn-toggle-dock" class="btn-toolbar" title="Toggle Hex Pane Dock Position (Right Split vs Bottom Split)">
+          <svg id="dock-icon" class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <line x1="9.5" y1="2.5" x2="9.5" y2="13.5" />
+          </svg>
+          <span id="dock-label">Right Hex</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 2. DUAL VISUAL MEMORY MAP BAR (64px) -->
+    <section class="memory-map-bar" aria-label="Visual Memory Map Ribbon">
+      <div class="memmap-controls">
+        <div class="memmap-title-row">
+          <span class="memmap-heading">MEMORY MAP</span>
+          <button id="btn-memmap-scale" class="scale-toggle-btn" title="Toggle between Sqrt Compressed Scale (shows __PAGEZERO without crushing segments) and Linear Scale">
+            Scale: <strong id="memmap-scale-label">Sqrt</strong>
+          </button>
+        </div>
+        <div class="memmap-legend">
+          <span class="legend-item"><i class="legend-swatch swatch-rx"></i>R-X</span>
+          <span class="legend-item"><i class="legend-swatch swatch-rw"></i>RW-</span>
+          <span class="legend-item"><i class="legend-swatch swatch-ro"></i>R--</span>
+          <span class="legend-item"><i class="legend-swatch swatch-hdr"></i>Hdr</span>
+          <span class="legend-item"><i class="legend-swatch swatch-cs"></i>Sign</span>
+        </div>
+      </div>
+
+      <div class="memmap-tracks-container" id="memmap-tracks-container">
+        <!-- Track 1: Physical File Offset Layout -->
+        <div class="memmap-track-row">
+          <div class="memmap-track-label" title="Physical File Layout on Disk (0x0 .. file_size)">FILE</div>
+          <div class="memmap-track" id="memmap-file-track"></div>
+        </div>
+        <!-- Track 2: Virtual Memory Address Layout -->
+        <div class="memmap-track-row">
+          <div class="memmap-track-label" title="Mapped Virtual Address Space (vmaddr .. vmaddr+vmsize)">VM</div>
+          <div class="memmap-track" id="memmap-vm-track"></div>
+        </div>
+        <!-- Synchronized Playhead Cursor Marker -->
+        <div id="memmap-playhead-file" class="memmap-playhead hidden"></div>
+        <div id="memmap-playhead-vm" class="memmap-playhead hidden"></div>
+      </div>
+    </section>
+
+    <!-- 3. REAL-TIME ADDRESS / OFFSET CONVERTER & BREADCRUMB BAR (34px) -->
+    <section class="converter-bar" aria-label="Real-Time Address &amp; Offset Converter">
+      <div class="converter-inputs-cluster">
+        <span class="converter-title" title="Bidirectional O(log N) Interval Translator (Hotkey: G)">
+          <svg class="converter-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M3 5h10M10 2l3 3-3 3M13 11H3m3-3-3 3 3 3" />
+          </svg>
+          TRANSLATE
+        </span>
+
+        <label class="conv-field">
+          <span class="conv-tag">File Off</span>
+          <input id="conv-abs-input" type="text" class="conv-input" placeholder="0x000000" spellcheck="false" />
+        </label>
+
+        <span class="conv-arrow">⇄</span>
+
+        <label class="conv-field">
+          <span class="conv-tag">Slice Off</span>
+          <input id="conv-slice-input" type="text" class="conv-input" placeholder="0x000000" spellcheck="false" />
+        </label>
+
+        <span class="conv-arrow">⇄</span>
+
+        <label class="conv-field">
+          <span class="conv-tag">VM Addr</span>
+          <input id="conv-vm-input" type="text" class="conv-input conv-input-wide" placeholder="0x100000000" spellcheck="false" />
+        </label>
+
+        <span class="conv-arrow">⇄</span>
+
+        <label class="conv-field">
+          <span class="conv-tag">RVA</span>
+          <input id="conv-rva-input" type="text" class="conv-input" placeholder="+0x0000" spellcheck="false" readonly />
+        </label>
+
+        <button id="btn-conv-jump-hex" class="btn-conv-action" title="Center Hex View on this Offset">Jump Hex</button>
+        <button id="btn-conv-disasm" class="btn-conv-action" title="Disassemble at this VM Address">Disassemble</button>
+      </div>
+
+      <!-- Resolved Context Pill (Segment, Section, Nearest Symbol) -->
+      <div class="converter-resolution" id="converter-resolution">
+        <span class="res-status-badge status-mapped" id="conv-status-badge">READY</span>
+        <span class="res-segment" id="conv-seg-pill">—</span>
+        <span class="res-symbol" id="conv-sym-pill">Type any File Offset or VM Address to resolve</span>
+      </div>
+    </section>
+
+    <!-- 4. MAIN 3-PANE WORKSPACE (Sidebar + Center Inspector + Docked Hex/ASCII Pane) -->
+    <main id="workspace-main" class="workspace-main dock-right">
+      <!-- 4A. LEFT SIDEBAR: HIERARCHICAL TREE NAVIGATOR -->
+      <aside id="left-sidebar" class="left-sidebar">
+        <div class="sidebar-search-bar">
+          <svg class="sidebar-filter-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+            <circle cx="6.8" cy="6.8" r="4.3" />
+            <line x1="10" y1="10" x2="13.8" y2="13.8" />
+          </svg>
+          <input
+            id="tree-filter-input"
+            type="text"
+            class="tree-filter-input"
+            placeholder="Filter tree nodes, load cmds, sections…"
+            spellcheck="false"
+          />
+          <button id="btn-tree-clear" class="tree-clear-btn hidden" title="Clear filter">×</button>
+        </div>
+
+        <div id="structure-tree" class="structure-tree" role="tree" aria-label="Mach-O Binary Structure Tree">
+          <!-- Populated dynamically by app.js -->
+        </div>
+      </aside>
+
+      <!-- Draggable Resizer 1 (Sidebar <-> Center Inspector) -->
+      <div id="resizer-left" class="pane-resizer resizer-vertical" title="Drag to resize Structure Tree"></div>
+
+      <!-- 4B. CENTER CONTEXT-SENSITIVE INSPECTOR PANE -->
+      <section id="center-inspector" class="center-inspector" aria-label="Structure &amp; Artifact Inspector">
+        <!-- Context Header Bar -->
+        <div class="inspector-header">
+          <div class="inspector-title-group">
+            <span id="inspector-category-badge" class="inspector-badge badge-purple">OVERVIEW</span>
+            <h1 id="inspector-title" class="inspector-title">Binary Overview</h1>
+            <span id="inspector-subtitle" class="inspector-subtitle"></span>
+          </div>
+
+          <div class="inspector-meta-pills" id="inspector-meta-pills">
+            <!-- Dynamic offset / VMAddr / size pills + Jump to Hex button -->
+          </div>
+        </div>
+
+        <!-- Inspector Sub-View Container -->
+        <div id="inspector-body" class="inspector-body">
+          <!-- Dynamically renders Overview, Structure Field Table, Virtualized Symbols, Strings, Disassembly, Code Signature, Security Audit -->
+        </div>
+      </section>
+
+      <!-- Draggable Resizer 2 (Center Inspector <-> Hex Pane) -->
+      <div id="resizer-hex" class="pane-resizer resizer-vertical" title="Drag to resize Hex &amp; ASCII Pane"></div>
+
+      <!-- 4C. SYNCHRONIZED VIRTUALIZED HEX & ASCII PANE + LIVE BYTE DECODER -->
+      <aside id="hex-pane" class="hex-pane" aria-label="Synchronized Hex &amp; ASCII View">
+        <!-- Hex Pane Toolbar -->
+        <div class="hex-toolbar">
+          <div class="hex-toolbar-left">
+            <span class="hex-pane-title">HEX / ASCII</span>
+            <button id="btn-hex-addr-mode" class="hex-mode-btn" title="Toggle Offset Column between File Offset and Virtual Memory Address (Hotkey: H)">
+              Col: <strong id="hex-addr-mode-label">File Offset</strong>
+            </button>
+            <span id="hex-selection-pill" class="hex-selection-pill">Cursor: 0x00000000</span>
+          </div>
+
+          <div class="hex-toolbar-right">
+            <form id="hex-goto-form" class="hex-goto-form">
+              <input
+                id="hex-goto-input"
+                type="text"
+                class="hex-goto-input"
+                placeholder="Go to 0x…"
+                spellcheck="false"
+              />
+            </form>
+          </div>
+        </div>
+
+        <!-- Sticky Column Header for 16-Byte Grid -->
+        <div class="hex-grid-header">
+          <span class="hex-col-offset" id="hex-col-offset-title">OFFSET</span>
+          <span class="hex-col-bytes">
+            <span>00</span><span>01</span><span>02</span><span>03</span><span>04</span><span>05</span><span>06</span><span>07</span>
+            <span class="byte-gap">08</span><span>09</span><span>0A</span><span>0B</span><span>0C</span><span>0D</span><span>0E</span><span>0F</span>
+          </span>
+          <span class="hex-col-ascii">ASCII</span>
+        </div>
+
+        <!-- Virtualized Scroll Viewport -->
+        <div id="hex-viewport" class="hex-viewport" tabindex="0">
+          <div id="hex-phantom" class="hex-phantom"></div>
+          <div id="hex-rows-container" class="hex-rows-container"></div>
+        </div>
+
+        <!-- Live Byte Inspector / Data Decoder Footer Card -->
+        <div class="byte-decoder-card" id="byte-decoder-card">
+          <div class="decoder-header">
+            <div class="decoder-breadcrumbs" id="decoder-breadcrumbs">
+              <span class="crumb-empty">Click any byte or structure field to inspect primitives &amp; ownership</span>
+            </div>
+            <button id="btn-decoder-endian" class="endian-toggle-btn" title="Toggle Little-Endian / Big-Endian Data Decoding">
+              Endian: <strong id="decoder-endian-label">Little</strong>
+            </button>
+          </div>
+
+          <div class="decoder-grid" id="decoder-grid">
+            <div class="dec-cell"><span class="dec-k">uint8 / int8</span><span class="dec-v" id="dec-u8">—</span></div>
+            <div class="dec-cell"><span class="dec-k">uint16 / int16</span><span class="dec-v" id="dec-u16">—</span></div>
+            <div class="dec-cell"><span class="dec-k">uint32 / hex32</span><span class="dec-v" id="dec-u32">—</span></div>
+            <div class="dec-cell"><span class="dec-k">uint64</span><span class="dec-v" id="dec-u64">—</span></div>
+            <div class="dec-cell"><span class="dec-k">ULEB128</span><span class="dec-v" id="dec-uleb">—</span></div>
+            <div class="dec-cell"><span class="dec-k">SLEB128</span><span class="dec-v" id="dec-sleb">—</span></div>
+            <div class="dec-cell"><span class="dec-k">float32 / 64</span><span class="dec-v" id="dec-float">—</span></div>
+            <div class="dec-cell"><span class="dec-k">ARM64 Insn</span><span class="dec-v dec-insn" id="dec-insn">—</span></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- 5. BOTTOM STATUS BAR (24px) -->
+    <footer class="status-bar">
+      <div class="status-left">
+        <span class="status-indicator" id="status-dot"></span>
+        <span id="status-text">Initializing MachOStudio…</span>
+        <span class="status-sep">|</span>
+        <span id="status-file" class="status-mono">No file loaded</span>
+        <span class="status-sep">|</span>
+        <span id="status-hash" class="status-mono" title="SHA-256 Digest">SHA-256: —</span>
+      </div>
+      <div class="status-right">
+        <span id="status-arch" class="status-mono">Arch: —</span>
+        <span class="status-sep">|</span>
+        <span id="status-span" class="status-mono">Selected: None</span>
+        <span class="status-sep">|</span>
+        <span class="status-shortcuts"><kbd>⌘K</kbd> Search <kbd>G</kbd> Translate <kbd>H</kbd> Offset/VM <kbd>[</kbd><kbd>]</kbd> History</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

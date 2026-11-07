@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Temporary build files in fixtures
+fixtures/*.c
+fixtures/*.m
+fixtures/*.cpp
+fixtures/*.slice
