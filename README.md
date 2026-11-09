@@ -1,11 +1,11 @@
-# MachOStudio — Multi-Format Binary Inspector, Semantic Intelligence & Systems Learning Suite (`Mach-O` • `ELF32/64` • `Windows PE32/PE32+`)
+# BinaryStudio — Multi-Format Binary Inspector, Disassembler, Semantic Intelligence & Systems Learning Suite (`Mach-O` • `ELF32/64` • `Windows PE32/PE32+`)
 
-**MachOStudio** (`macho_viewer`) is a zero-dependency cross-platform reverse-engineering, binary security verification, semantic intelligence, and interactive systems pedagogy suite supporting:
+**BinaryStudio** (`binary_viewer.py`, formerly `MachOStudio` / `macho_viewer.py`) is a zero-dependency cross-platform reverse-engineering, multi-architecture disassembly, binary security verification, semantic intelligence, and interactive systems pedagogy suite supporting:
 1. **Apple Mach-O & Universal (Fat) 32/64-bit Binaries:** Userland (`MH_EXECUTE`, `MH_DYLIB`, `MH_BUNDLE`, `MH_OBJECT`, `MH_DYLINKER`, `MH_DSYM`) and Kernel/Firmware (`MH_PRELOAD`, `MH_KEXT_BUNDLE`, `MH_FILESET`), with live SHA-256 `LC_CODE_SIGNATURE` verification and `ARM64E` PAC Chained Fixups.
 2. **Linux / SVR4 ELF32 & ELF64 Binaries:** `ET_EXEC`, `ET_DYN` (PIE & `.so`), `ET_REL`, `ET_CORE`, Program Headers (`PT_LOAD`, `PT_DYNAMIC`, `PT_INTERP`, `PT_NOTE`, `PT_GNU_STACK`, `PT_GNU_RELRO`), Section Headers, `.dynamic` tags, PLT/GOT relocations, and GNU Notes (`Build-ID`, `ABI-tag`, Intel CET `IBT/SHSTK`, ARM64 `PAC/BTI`).
 3. **Windows PE32 (32-bit) & PE32+ (64-bit) Binaries:** `.exe`, `.dll`, `.sys` kernel drivers, MS-DOS stub, XOR-decrypted **Rich Header** (`DanS`/`Rich` `@comp.id` toolchain fingerprint), COFF & Optional Headers, 16 Data Directories, Import Lookup/Address Tables (`ILT`/`IAT`), Export Directory + Forwarders, Base Relocations (`.reloc`), CodeView `RSDS` PDB GUID/path, TLS Callbacks, Load Config (`/GS` cookie & `GUARD_CF`), and `WIN_CERTIFICATE` Authenticode PKCS#7 signatures.
 
-Inspired by **MachOView**, **ImHex**, **DIE (Detect It Easy)**, **PE-bear**, **Binary Ninja**, and **Godbolt Compiler Explorer**, MachOStudio pairs a 100% Python 3 standard-library analysis engine with a desktop-class Web IDE and a scriptable CLI.
+Inspired by **MachOView**, **ImHex**, **DIE (Detect It Easy)**, **PE-bear**, **Binary Ninja**, and **Godbolt Compiler Explorer**, BinaryStudio pairs a 100% Python 3 standard-library analysis engine with a desktop-class Web IDE and a scriptable CLI.
 
 > 📖 **Deep Technical References:**
 > - **[`docs/INNER_WORKINGS.md`](./docs/INNER_WORKINGS.md):** Byte-level specification and architectural walkthrough of Mach-O, ELF32/64, Windows PE32/PE32+, the 4 Semantic Intelligence layers, and the Interactive Pedagogy engine.
@@ -30,56 +30,56 @@ Inspired by **MachOView**, **ImHex**, **DIE (Detect It Easy)**, **PE-bear**, **B
 
 ## Quick Start
 
-MachOStudio uses **100% pure Python 3 Standard Library** on the backend and **Vanilla ES6+ HTML/CSS/JS** on the frontend. **No `pip install`, `npm install`, or virtual environment is required.**
+BinaryStudio uses **100% pure Python 3 Standard Library** on the backend and **Vanilla ES6+ HTML/CSS/JS** on the frontend. **No `pip install`, `npm install`, or virtual environment is required.**
 
 ### 1. Launch the Interactive Desktop Web IDE
 
 ```bash
-cd macho_viewer
-python3 macho_viewer.py
+python3 binary_viewer.py
 ```
+*(Note: `python3 macho_viewer.py` is retained as a backward-compatible alias.)*
 
 By default, the server starts on `http://127.0.0.1:8421` and automatically builds all 6 deterministic synthetic test fixtures in `fixtures/` (`synthetic_universal`, `synthetic_firmware.preload`, `synthetic_elf64`, `synthetic_elf32`, `synthetic_pe64.exe`, `synthetic_pe32.exe`).
 
 - **Auto-open in your default browser on launch:**
   ```bash
-  python3 macho_viewer.py --open
+  python3 binary_viewer.py --open
   ```
 - **Launch on a custom port with a specific Mach-O, ELF, or PE binary pre-loaded:**
   ```bash
-  python3 macho_viewer.py --port 8421 --file fixtures/synthetic_pe64.exe --open
+  python3 binary_viewer.py --port 8421 --file fixtures/synthetic_pe64.exe --open
   ```
 
 ### 2. Built-In Sample Presets in the UI
 Click any of the built-in preset pills in the top toolbar (or drag-and-drop any Mach-O, ELF, or Windows PE binary onto the window):
-1. **Universal Mach-O (`fixtures/synthetic_universal`):** Multi-arch (`arm64` + `x86_64`) Mach-O with custom segments, C++/ObjC symbols, chained fixups, and XML/DER entitlements (`get-task-allow`, `allow-jit`).
+1. **Mach-O Universal (`fixtures/synthetic_universal`):** Multi-arch (`arm64` + `x86_64`) Mach-O with custom segments, C++/ObjC symbols, chained fixups, and XML/DER entitlements (`get-task-allow`, `allow-jit`).
 2. **Firmware (`MH_PRELOAD`) (`fixtures/synthetic_firmware.preload`):** Standalone ARM64 firmware image with `LC_UNIXTHREAD` registers, firmware strings, and an intentional `RWX` segment.
-3. **Linux ELF64 (PIE + CET) (`fixtures/synthetic_elf64`):** 64-bit `x86_64` `ET_DYN` PIE executable with Full RELRO (`PT_GNU_RELRO` + `DF_BIND_NOW`), NX stack, Intel CET (`IBT | SHSTK`), GNU `Build-ID`, PLT/GOT relocations, and C++/C symbols.
-4. **Linux ELF32 (Legacy) (`fixtures/synthetic_elf32`):** 32-bit `i386` `ET_EXEC` binary with an executable stack (`PT_GNU_STACK` `RWE`) that triggers security posture warnings.
-5. **Windows PE32+ (Signed) (`fixtures/synthetic_pe64.exe`):** 64-bit `x86_64` Windows executable with XOR-encoded Rich Header, ASLR (`HIGH_ENTROPY_VA`), DEP, Control Flow Guard (`GUARD_CF`), `/GS` cookie, `KERNEL32.dll`/`WS2_32.dll` imports, forwarded exports, CodeView `RSDS` PDB path, and `WIN_CERTIFICATE` Authenticode signature.
-6. **Windows PE32 (TLS + RWX) (`fixtures/synthetic_pe32.exe`):** 32-bit `i386` Windows executable containing a pre-main `IMAGE_DIRECTORY_ENTRY_TLS` callback and an `RWX` section (`.rwxcode`) to demonstrate anomaly forensics.
+3. **ELF64 (`x86_64`) (`fixtures/synthetic_elf64`):** 64-bit `x86_64` `ET_DYN` PIE executable with Full RELRO (`PT_GNU_RELRO` + `DF_BIND_NOW`), NX stack, Intel CET (`IBT | SHSTK`), GNU `Build-ID`, PLT/GOT relocations, and C++/C symbols.
+4. **ELF32 (`i386`) (`fixtures/synthetic_elf32`):** 32-bit `i386` `ET_EXEC` binary with an executable stack (`PT_GNU_STACK` `RWE`) that triggers security posture warnings.
+5. **PE32+ (`Win64`) (`fixtures/synthetic_pe64.exe`):** 64-bit `x86_64` Windows executable with XOR-encoded Rich Header, ASLR (`HIGH_ENTROPY_VA`), DEP, Control Flow Guard (`GUARD_CF`), `/GS` cookie, `KERNEL32.dll`/`WS2_32.dll` imports, forwarded exports, CodeView `RSDS` PDB path, and `WIN_CERTIFICATE` Authenticode signature.
+6. **PE32 (`Win32`) (`fixtures/synthetic_pe32.exe`):** 32-bit `i386` Windows executable containing a pre-main `IMAGE_DIRECTORY_ENTRY_TLS` callback and an `RWX` section (`.rwxcode`) to demonstrate anomaly forensics.
 7. **`/bin/ls` & `/usr/bin/true`:** Real host system binaries (Universal Mach-O on macOS or ELF64 on Linux).
 
 ---
 
 ## Headless CLI Usage (`--cli`)
 
-MachOStudio includes a full-featured command-line interface for terminal inspection across Mach-O, ELF, and PE files:
+BinaryStudio includes a full-featured command-line interface for terminal inspection across Mach-O, ELF, and PE files:
 
 ```bash
 # 1. Human-readable executive summary (Overview, Segments, Security Scorecard, Entropy, Capabilities & Anomalies)
-python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe
-python3 macho_viewer.py --cli fixtures/synthetic_elf64
-python3 macho_viewer.py --cli fixtures/synthetic_universal
+python3 binary_viewer.py --cli fixtures/synthetic_pe64.exe
+python3 binary_viewer.py --cli fixtures/synthetic_elf64
+python3 binary_viewer.py --cli fixtures/synthetic_universal
 
 # 2. Translate a Virtual Memory Address (VMAddr) or File Offset to Segment/Section/Symbol
-python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe --translate 0x140001000
+python3 binary_viewer.py --cli fixtures/synthetic_pe64.exe --translate 0x140001000
 
 # 3. Disassemble ARM64 or x86/x86_64 instructions at the entry point or a specific VMAddr
-python3 macho_viewer.py --cli fixtures/synthetic_elf64 --disasm 0x1040
+python3 binary_viewer.py --cli fixtures/synthetic_elf64 --disasm 0x1040
 
 # 4. Emit the complete canonical Document JSON schema (including semantic_layers & pedagogy)
-python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe --json | python3 -m json.tool | head -n 50
+python3 binary_viewer.py --cli fixtures/synthetic_pe64.exe --json | python3 -m json.tool | head -n 50
 ```
 
 ---
@@ -87,7 +87,8 @@ python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe --json | python3 -m js
 ## Project Architecture & Directory Layout
 
 ```text
-├── macho_viewer.py                 # Unified CLI inspector & ThreadingHTTPServer launcher
+├── binary_viewer.py                # Primary CLI inspector & ThreadingHTTPServer Web IDE launcher
+├── macho_viewer.py                 # Backward-compatible CLI & server wrapper
 ├── README.md                       # Project guide, quick start, CLI & REST API reference
 ├── backend/
 │   ├── __init__.py
@@ -110,7 +111,7 @@ python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe --json | python3 -m js
 │   └── app.js                      # Format-adaptive tree, Semantic/Entropy Inspector, OS Loader Simulator, Rosetta Matrix & Guided Tours
 ├── fixtures/                       # Auto-generated synthetic test binaries (Mach-O, ELF32/64, PE32/PE32+)
 ├── tests/
-│   └── test_macho_viewer.py        # 15 end-to-end automated unit & integration verification tests
+│   └── test_binary_viewer.py        # 15 end-to-end automated unit & integration verification tests
 └── docs/
     ├── INNER_WORKINGS.md           # Deep technical guide to Mach-O, ELF, PE, Semantic Layers & Pedagogy
     ├── WEB_HOSTING_AND_MONETIZATION.md # Cloud sandboxing, WebAssembly architecture & SaaS monetization blueprint
@@ -124,7 +125,7 @@ python3 macho_viewer.py --cli fixtures/synthetic_pe64.exe --json | python3 -m js
 
 ## Verification & Automated Test Suite
 
-Run all 15 end-to-end verification tests in [`tests/test_macho_viewer.py`](./tests/test_macho_viewer.py):
+Run all 15 end-to-end verification tests in [`tests/test_binary_viewer.py`](./tests/test_binary_viewer.py):
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -132,18 +133,18 @@ python3 -m unittest discover -s tests -v
 
 | Test Case | Verification Scope |
 | :--- | :--- |
-| [`test_01_fixtures_built`](./tests/test_macho_viewer.py#L46-L52) | Builds all 6 deterministic Mach-O, ELF32/64, and PE32/PE32+ fixtures via [`ensure_fixtures`](./backend/fixtures.py#L1217-L1242). |
-| [`test_02_parse_synthetic_universal`](./tests/test_macho_viewer.py#L54-L106) | Verifies Universal Fat header, custom segments/sections, C++ demangling, `@rpath`, XML/DER entitlements, and SHA-256 `CDHash` verification. |
-| [`test_03_parse_synthetic_firmware_preload`](./tests/test_macho_viewer.py#L108-L143) | Verifies standalone `MH_PRELOAD` firmware parsing, `LC_UNIXTHREAD` registers, `RWX` detection, and ARM64 disassembly. |
-| [`test_04_parse_real_system_binaries`](./tests/test_macho_viewer.py#L145-L174) | Verifies host `/bin/ls` and `/usr/bin/true` binaries across macOS (Universal Mach-O) and Linux (ELF64). |
-| [`test_05_translate_hex_decode_search`](./tests/test_macho_viewer.py#L175-L199) | Verifies $O(\log N)$ `VMAddr <-> File Offset` translation, `S_ZEROFILL` detection, live byte decoding, and omni-search. |
-| [`test_06_http_api_endpoints`](./tests/test_macho_viewer.py#L200-L274) | Spins up `ThreadingHTTPServer` and exercises `/api/presets`, `/api/parse`, `/api/hex`, `/api/decode`, `/api/translate`, `/api/disassemble`, `/api/search`, and `/api/upload`. |
-| [`test_07_cli_modes`](./tests/test_macho_viewer.py#L276-L286) | Verifies `python3 macho_viewer.py --cli` executive report (including Semantic & Anomaly summary) and disassembly output. |
-| [`test_08_cross_validate_against_otool_and_codesign`](./tests/test_macho_viewer.py#L288-L389) | Cross-validates Mach-O headers, segments, and `CDHash` against macOS `/usr/bin/otool` and `/usr/bin/codesign`. |
-| [`test_09_java_class_disambiguation_and_malformed_inputs`](./tests/test_macho_viewer.py#L390-L426) | Verifies rejection of Java `.class` files (`0xCAFEBABE`) and graceful handling of truncated/malformed buffers. |
-| [`test_10_32bit_and_big_endian_macho_parsing`](./tests/test_macho_viewer.py#L427-L518) | Verifies 32-bit Little-Endian (`MH_MAGIC` ARMv7) and 32-bit Big-Endian (`MH_CIGAM` PowerPC) Mach-O parsing. |
-| [`test_11_parse_synthetic_elf64_and_elf32`](./tests/test_macho_viewer.py#L519-L581) | Verifies ELF64 & ELF32 parsing, Program/Section headers, `.dynamic`, GNU Notes (`Build-ID`, `ABI-tag`, Intel CET `IBT/SHSTK`), PLT/GOT relocations, x86_64 disassembly, and 9-point ELF security posture. |
-| [`test_12_parse_synthetic_pe64_and_pe32`](./tests/test_macho_viewer.py#L582-L645) | Verifies PE32+ & PE32 parsing, XOR-decrypted Rich Header, Data Directories, Imports (name & ordinal), Exports + Forwarders, `.reloc`, CodeView `RSDS` PDB, `/GS` cookie, `WIN_CERTIFICATE` Authenticode, and TLS/RWX audit. |
-| [`test_13_semantic_layers_and_entropy_intelligence`](./tests/test_macho_viewer.py#L646-L683) | Verifies Shannon entropy & 4-bucket byte distribution, Behavioral Capability Taxonomy, Toolchain Provenance, and Structural Anomaly Forensics (`rwx_memory`, `pe_tls_callbacks`). |
-| [`test_14_pedagogy_loader_lifecycle_rosetta_and_tours`](./tests/test_macho_viewer.py#L684-L729) | Verifies the 6-Stage OS Loader Lifecycle Simulator, 10-Row Rosetta Stone Matrix, Header Field Pedagogy Annotations, and Guided Learning Tours with Micro-Challenges across Mach-O, ELF, and PE. |
-| [`test_15_cross_validate_elf_against_readelf_and_multi_format_api`](./tests/test_macho_viewer.py#L730-L769) | Cross-validates ELF64 against `/usr/bin/readelf` (when on Linux) and tests `/api/decode` field pedagogy and `/api/translate` on ELF64 and PE32+. |
+| [`test_01_fixtures_built`](./tests/test_binary_viewer.py#L46-L52) | Builds all 6 deterministic Mach-O, ELF32/64, and PE32/PE32+ fixtures via [`ensure_fixtures`](./backend/fixtures.py#L1217-L1242). |
+| [`test_02_parse_synthetic_universal`](./tests/test_binary_viewer.py#L54-L106) | Verifies Universal Fat header, custom segments/sections, C++ demangling, `@rpath`, XML/DER entitlements, and SHA-256 `CDHash` verification. |
+| [`test_03_parse_synthetic_firmware_preload`](./tests/test_binary_viewer.py#L108-L143) | Verifies standalone `MH_PRELOAD` firmware parsing, `LC_UNIXTHREAD` registers, `RWX` detection, and ARM64 disassembly. |
+| [`test_04_parse_real_system_binaries`](./tests/test_binary_viewer.py#L145-L174) | Verifies host `/bin/ls` and `/usr/bin/true` binaries across macOS (Universal Mach-O) and Linux (ELF64). |
+| [`test_05_translate_hex_decode_search`](./tests/test_binary_viewer.py#L175-L199) | Verifies $O(\log N)$ `VMAddr <-> File Offset` translation, `S_ZEROFILL` detection, live byte decoding, and omni-search. |
+| [`test_06_http_api_endpoints`](./tests/test_binary_viewer.py#L200-L274) | Spins up `ThreadingHTTPServer` and exercises `/api/presets`, `/api/parse`, `/api/hex`, `/api/decode`, `/api/translate`, `/api/disassemble`, `/api/search`, and `/api/upload`. |
+| [`test_07_cli_modes`](./tests/test_binary_viewer.py#L276-L304) | Verifies `python3 binary_viewer.py --cli` (and `macho_viewer.py` alias) executive report and disassembly output across Mach-O, ELF64, and PE32+. |
+| [`test_08_cross_validate_against_otool_and_codesign`](./tests/test_binary_viewer.py#L288-L389) | Cross-validates Mach-O headers, segments, and `CDHash` against macOS `/usr/bin/otool` and `/usr/bin/codesign`. |
+| [`test_09_java_class_disambiguation_and_malformed_inputs`](./tests/test_binary_viewer.py#L390-L426) | Verifies rejection of Java `.class` files (`0xCAFEBABE`) and graceful handling of truncated/malformed buffers. |
+| [`test_10_32bit_and_big_endian_macho_parsing`](./tests/test_binary_viewer.py#L427-L518) | Verifies 32-bit Little-Endian (`MH_MAGIC` ARMv7) and 32-bit Big-Endian (`MH_CIGAM` PowerPC) Mach-O parsing. |
+| [`test_11_parse_synthetic_elf64_and_elf32`](./tests/test_binary_viewer.py#L519-L581) | Verifies ELF64 & ELF32 parsing, Program/Section headers, `.dynamic`, GNU Notes (`Build-ID`, `ABI-tag`, Intel CET `IBT/SHSTK`), PLT/GOT relocations, x86_64 disassembly, and 9-point ELF security posture. |
+| [`test_12_parse_synthetic_pe64_and_pe32`](./tests/test_binary_viewer.py#L582-L645) | Verifies PE32+ & PE32 parsing, XOR-decrypted Rich Header, Data Directories, Imports (name & ordinal), Exports + Forwarders, `.reloc`, CodeView `RSDS` PDB, `/GS` cookie, `WIN_CERTIFICATE` Authenticode, and TLS/RWX audit. |
+| [`test_13_semantic_layers_and_entropy_intelligence`](./tests/test_binary_viewer.py#L646-L683) | Verifies Shannon entropy & 4-bucket byte distribution, Behavioral Capability Taxonomy, Toolchain Provenance, and Structural Anomaly Forensics (`rwx_memory`, `pe_tls_callbacks`). |
+| [`test_14_pedagogy_loader_lifecycle_rosetta_and_tours`](./tests/test_binary_viewer.py#L684-L729) | Verifies the 6-Stage OS Loader Lifecycle Simulator, 10-Row Rosetta Stone Matrix, Header Field Pedagogy Annotations, and Guided Learning Tours with Micro-Challenges across Mach-O, ELF, and PE. |
+| [`test_15_cross_validate_elf_against_readelf_and_multi_format_api`](./tests/test_binary_viewer.py#L730-L769) | Cross-validates ELF64 against `/usr/bin/readelf` (when on Linux) and tests `/api/decode` field pedagogy and `/api/translate` on ELF64 and PE32+. |

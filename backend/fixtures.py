@@ -605,7 +605,7 @@ def _build_synthetic_elf64(fixtures_dir: str) -> str:
 
     # Build .rodata at 0x1080
     rodata_bytes = (
-        b"ELF64_SYNTHETIC_SERVICE_V3.0: TLS=1.3; ENDPOINT=https://telemetry.machostudio.dev/v1/heartbeat\x00"
+        b"ELF64_SYNTHETIC_SERVICE_V3.0: TLS=1.3; ENDPOINT=https://telemetry.binarystudio.dev/v1/heartbeat\x00"
         b"/etc/ssl/certs/ca-certificates.crt\x00"
         b"AES-256-GCM hardware acceleration enabled\x00"
     )
@@ -875,7 +875,7 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
     - Debug Directory with `IMAGE_DEBUG_TYPE_CODEVIEW` (`RSDS` PDB signature, GUID, age, PDB path)
     - Load Config Directory (`SecurityCookie` `/GS` + Control Flow Guard flags)
     - Base Relocation Table (`.reloc` with `IMAGE_REL_BASED_DIR64`)
-    - Security Directory (`WIN_CERTIFICATE` Authenticode PKCS#7 signed data with CN=`MachOStudio Synthetic Corp`)
+    - Security Directory (`WIN_CERTIFICATE` Authenticode PKCS#7 signed data with CN=`BinaryStudio Synthetic Corp`)
     """
     out_path = os.path.join(fixtures_dir, "synthetic_pe64.exe")
     if os.path.isfile(out_path) and os.path.getsize(out_path) >= 6144:
@@ -1091,8 +1091,8 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
     img[rva_to_off(0x2500) : rva_to_off(0x2500) + 112] = load_cfg
 
     # ASCII & UTF-16LE strings in .rdata at RVA 0x2580
-    ascii_str = b"PE32+_TELEMETRY_AGENT::https://api.machostudio.dev/v2/symbols\x00Software\\Microsoft\\Windows\\CurrentVersion\\Run\x00"
-    utf16_str = "MachOStudio Windows PE32+ Security Inspector v3.0".encode("utf-16le") + b"\x00\x00"
+    ascii_str = b"PE32+_TELEMETRY_AGENT::https://api.binarystudio.dev/v2/symbols\x00Software\\Microsoft\\Windows\\CurrentVersion\\Run\x00"
+    utf16_str = "BinaryStudio Windows PE32+ Security Inspector v3.0".encode("utf-16le") + b"\x00\x00"
     img[rva_to_off(0x2580) : rva_to_off(0x2580) + len(ascii_str)] = ascii_str
     img[rva_to_off(0x2600) : rva_to_off(0x2600) + len(utf16_str)] = utf16_str
 
@@ -1112,8 +1112,8 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
 
     # 7. Populate WIN_CERTIFICATE (Authenticode PKCS#7) at file offset 0x1800
     # In X.509 TBSCertificate, Issuer CN appears first, followed by Subject CN
-    cn_str = b"MachOStudio Synthetic Corp"
-    issuer_str = b"MachOStudio Root Code Signing CA"
+    cn_str = b"BinaryStudio Synthetic Corp"
+    issuer_str = b"BinaryStudio Root Code Signing CA"
     pkcs7_der = (
         b"\x30\x82\x01\x00\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02"
         + b"\x06\x03\x55\x04\x03\x0c"

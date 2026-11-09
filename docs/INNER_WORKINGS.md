@@ -1,6 +1,6 @@
-# The Inner Workings of Mach-O & the Mach-O File Viewer (`MachOStudio`)
+# The Inner Workings of BinaryStudio (`Mach-O` • `ELF32/64` • `Windows PE32/PE32+`)
 
-This document provides a byte-level engineering reference for the **Mach-O (Mach Object)** binary format across macOS, iOS, watchOS, XNU kernels, and standalone Apple Silicon firmware (`iBoot`/`SecureROM`/`SEP`), paired with a deep architectural walkthrough of how **MachOStudio** (`macho_viewer`) parses, indexes, verifies, and visualizes binaries in real time.
+This document provides a byte-level engineering reference for **Apple Mach-O** (macOS, iOS, watchOS, XNU kernels, and standalone Apple Silicon firmware), **Linux / SVR4 ELF32 & ELF64**, and **Windows PE32 & PE32+** binaries, paired with a deep architectural walkthrough of how **BinaryStudio** (`binary_viewer.py`) parses, disassembles, indexes, verifies, and visualizes binaries in real time.
 
 ---
 
@@ -98,13 +98,13 @@ Unlike thin Mach-O headers (which are typically little-endian on x86 and ARM), *
 
 Both Universal Mach-O binaries and compiled Java bytecode (`.class`) files begin with the 4-byte sequence `CA FE BA BE` (`0xCAFEBABE` big-endian).
 
- Why does this collision exist, and how do `file(1)`, `lipo(1)`, XNU's `exec_mach_imgact`, and **MachOStudio** disambiguate them?
+ Why does this collision exist, and how do `file(1)`, `lipo(1)`, XNU's `exec_mach_imgact`, and **BinaryStudio** disambiguate them?
 - **Java `.class` Layout:**
   - `+0x00..0x03`: `magic` = `0xCAFEBABE`
   - `+0x04..0x05`: `minor_version` (`uint16_t`)
   - `+0x06..0x07`: `major_version` (`uint16_t`, where Java 1.1 = `45` (`0x002D`) through Java 21 = `65` (`0x0041`)).
   - When interpreted as a 32-bit big-endian integer `nfat_arch` at `+0x04..0x07`, a Java class file with `minor=0, major=55` yields `nfat_arch = 55` (or if `minor != 0`, `nfat_arch >= 65536`).
-- **MachOStudio's Multi-Constraint Verification (in [`parse_macho_bytes`](../backend/parser.py#L1710-L1842)):**
+- **BinaryStudio's Multi-Constraint Verification (in [`parse_macho_bytes`](../backend/parser.py#L1710-L1842)):**
   1. **Bounded Architecture Count:** `1 <= nfat_arch <= 32` (Java class files have `major_version >= 45`).
   2. **Header & Slice Bounds Check:** For every `fat_arch[i]`, `offset >= sizeof(fat_header) + nfat_arch * sizeof(fat_arch)` and `offset + size <= file_size`.
   3. **Target Slice Magic Inspection:** The first 4 bytes at `file[fat_arch[i].offset]` must match a valid Mach-O magic (`0xFEEDFACE`, `0xFEEDFACF`, `0xCEFAEDFE`, `0xCFFAEDFE`) or static `ar` archive header (`!<arch>\n`).
@@ -389,7 +389,7 @@ flowchart TD
 ```
 
 > [!TIP]
-> **Cycle-Detection Guard:** Malformed or intentionally obfuscated Mach-O binaries can encode cyclic `child_node_offset` edges that cause naive recursive parsers to stack-overflow. MachOStudio's trie walker in [`parse_exports_trie`](../backend/parser.py#L148-L232) maintains a `visited: Set[int]` of node offsets and enforces a depth/node budget.
+> **Cycle-Detection Guard:** Malformed or intentionally obfuscated Mach-O binaries can encode cyclic `child_node_offset` edges that cause naive recursive parsers to stack-overflow. BinaryStudio's trie walker in [`parse_exports_trie`](../backend/parser.py#L148-L232) maintains a `visited: Set[int]` of node offsets and enforces a depth/node budget.
 
 ---
 
@@ -479,7 +479,7 @@ while pos < dataoff + datasize:
     current_offset += delta
     func_vmaddr = text_segment.vmaddr + current_offset
 ```
-Because ARM64 instructions are 4-byte aligned, deltas are compact (typically 1–2 bytes per function). If `func_vmaddr` matches a symbol in `LC_SYMTAB`, MachOStudio labels it with that symbol name (e.g., `_main`); otherwise, it synthesizes an IDA/Binary Ninja-style label `sub_<vmaddr>`.
+Because ARM64 instructions are 4-byte aligned, deltas are compact (typically 1–2 bytes per function). If `func_vmaddr` matches a symbol in `LC_SYMTAB`, BinaryStudio labels it with that symbol name (e.g., `_main`); otherwise, it synthesizes an IDA/Binary Ninja-style label `sub_<vmaddr>`.
 
 ---
 
@@ -586,7 +586,7 @@ A unique design feature of `CS_CodeDirectory` is that **`hashOffset` points to t
 
 ### 3.3 Live CDHash & Page-Level SHA-256 Verification Algorithm
 
-When the macOS kernel (`amfi` / XNU pager) validates a Mach-O binary, it uses a **two-tier Merkle-like verification chain**, which MachOStudio replicates live against the on-disk binary in [`_parse_code_directory`](../backend/codesign.py#L566-L630):
+When the macOS kernel (`amfi` / XNU pager) validates a Mach-O binary, it uses a **two-tier Merkle-like verification chain**, which BinaryStudio replicates live against the on-disk binary in [`_parse_code_directory`](../backend/codesign.py#L566-L630):
 
 ```mermaid
 flowchart TD
@@ -600,10 +600,10 @@ flowchart TD
    - The entire raw byte span of the `CS_CodeDirectory` sub-blob (`cd_off .. cd_off + length`) is hashed with `hashType` (typically `SHA-256`).
    - The **full digest** is 32 bytes (64 hex chars), and the canonical **truncated `CDHash`** reported by `codesign -dvvv` is the first **20 bytes** (40 hex chars): `sha256(raw_cd_bytes)[:20].hex()`.
 2. **Verifying Special Slots (`-2`, `-5`, `-7`):**
-   - For each special slot $-s$ where the 32-byte slot hash is non-zero, MachOStudio hashes the corresponding raw sub-blob from the `CS_SuperBlob` (including its 8-byte `magic + length` header!) and checks `sha256(slot_raw_blobs[sb_type]) == expected_slot_hash`.
+   - For each special slot $-s$ where the 32-byte slot hash is non-zero, BinaryStudio hashes the corresponding raw sub-blob from the `CS_SuperBlob` (including its 8-byte `magic + length` header!) and checks `sha256(slot_raw_blobs[sb_type]) == expected_slot_hash`.
 3. **Verifying Code Page Slots (`0 .. nCodeSlots - 1`):**
    - For page $p$, the slice byte range is `[p * page_size, min((p + 1) * page_size, code_limit)]`.
-   - MachOStudio computes `actual_hash = sha256(slice_bytes)` and compares it byte-for-byte against `CodeDirectory` slot $p$. If any byte in `__TEXT` or `__DATA` is patched on disk without re-signing, `verified` immediately flips to `False`.
+   - BinaryStudio computes `actual_hash = sha256(slice_bytes)` and compares it byte-for-byte against `CodeDirectory` slot $p$. If any byte in `__TEXT` or `__DATA` is patched on disk without re-signing, `verified` immediately flips to `False`.
 
 ---
 
@@ -632,7 +632,7 @@ Slot `0x10000` (`CSSLOT_SIGNATURESLOT`) has magic `CSMAGIC_BLOBWRAPPER` (`0xFADE
 
 ### 4.1 End-to-End Layered Engine Pipeline
 
-MachOStudio is architected as a **zero-dependency, 3-layer backend engine** (`backend/`) paired with a **virtualized desktop-class Web IDE** (`static/`) and a **headless CLI** (`macho_viewer.py`).
+BinaryStudio is architected as a **zero-dependency, 4-layer backend engine** (`backend/`) paired with a **virtualized desktop-class Web IDE** (`static/`) and a **headless CLI** (`binary_viewer.py`).
 
 ```mermaid
 flowchart TB
@@ -680,7 +680,7 @@ flowchart TB
 
 A common anti-pattern in binary viewers is duplicating struct definitions—once to parse values and a second time to compute offsets for the UI table and hex highlighter.
 
-In MachOStudio, [`BinaryBuffer`](../backend/buffer.py#L32-L233) unifies parsing and layout tracking:
+In BinaryStudio, [`BinaryBuffer`](../backend/buffer.py#L32-L233) unifies parsing and layout tracking:
 1. When parsing a slice inside a Universal binary at `slice_base` (e.g., `0x18000`), `sub_slice(slice_base, slice_size, little_endian)` creates a scoped view over the underlying file `bytes`.
 2. As the parser reads fields via `u8`, `u16`, `u32`, `u64`, `fixed_cstr`, or `read_uleb128`, it calls [`record_field(...)`](../backend/buffer.py#L185-L233), which automatically captures:
    - `abs_offset = self.slice_base + slice_offset` (exact physical byte coordinate in the file)
@@ -695,7 +695,7 @@ In MachOStudio, [`BinaryBuffer`](../backend/buffer.py#L32-L233) unifies parsing 
 
 ### 4.3 $O(\log N)$ Bidirectional Interval Index for Hex ↔ Structure Synchronization
 
-To achieve instantaneous bidirectional synchronization between the **Center Inspector**, **Structure Tree**, **Dual Memory Map Ribbon**, and **Virtualized Hex/ASCII Pane**—even on 100+ MB binaries where rendering all DOM rows would freeze the browser—MachOStudio uses two key mechanisms:
+To achieve instantaneous bidirectional synchronization between the **Center Inspector**, **Structure Tree**, **Dual Memory Map Ribbon**, and **Virtualized Hex/ASCII Pane**—even on 100+ MB binaries where rendering all DOM rows would freeze the browser—BinaryStudio uses two key mechanisms:
 
 #### 1. Viewport-Virtualized Hex Grid ($O(1)$ Mounted DOM Nodes)
 - A 100 MB binary contains $6,553,600$ 16-byte rows. Instead of mounting millions of DOM nodes, [`renderHexViewport`](../static/app.js#L2286-L2369) calculates `startRow = Math.floor(scrollTop / HEX_ROW_HEIGHT)` and renders only the **~45 visible rows** plus a small overscan buffer, fetching 4 KB byte chunks on demand via [`ensureHexChunk`](../static/app.js#L2240-L2273) $\rightarrow$ [`AnalysisService.get_hex_slice`](../backend/service.py#L268-L334) (`GET /api/hex`).
@@ -724,7 +724,7 @@ File Offset:  0x18000                                              0x291F0
 
 Reverse engineers constantly translate between an address seen in a crash log or disassembler (`0x100003f60`), a Relative Virtual Address (`RVA = +0x3f60`), a Mach-O slice offset (`0x3f60`), and a physical file offset (`0x1bf60`).
 
-MachOStudio's translator ([`AnalysisService.translate_address`](../backend/service.py#L112-L263) backing `GET /api/translate` and [`runTranslateQuery`](../static/app.js#L2474-L2489) in the live `TRANSLATE` toolbar) resolves any coordinate in $O(\log N)$ time across segment, section, and symbol intervals:
+BinaryStudio's translator ([`AnalysisService.translate_address`](../backend/service.py#L112-L263) backing `GET /api/translate` and [`runTranslateQuery`](../static/app.js#L2474-L2489) in the live `TRANSLATE` toolbar) resolves any coordinate in $O(\log N)$ time across segment, section, and symbol intervals:
 
 ```mermaid
 flowchart TD
@@ -747,9 +747,9 @@ flowchart TD
 
 ### 4.5 Automated Binary Hardening & Security Posture Analyzer
 
-Implemented in [`evaluate_security_posture`](../backend/security.py#L19-L336), MachOStudio automatically audits every Mach-O slice against **9 binary hardening criteria**:
+Implemented in [`evaluate_security_posture`](../backend/security.py#L19-L336), BinaryStudio automatically audits every Mach-O slice against **9 binary hardening criteria**:
 
-| Check ID | Security Mechanism | How MachOStudio Verifies It at the Binary Level |
+| Check ID | Security Mechanism | How BinaryStudio Verifies It at the Binary Level |
 | :--- | :--- | :--- |
 | `pie` | **Position Independent Executable (ASLR)** | Checks `MH_PIE` (`0x00200000`) in `mach_header.flags` for `MH_EXECUTE` binaries (or marks `MH_PRELOAD` firmware as fixed-base `INFO`). |
 | `stack_canary` | **Stack Smashing Protection** | Scans `LC_SYMTAB` undefined/defined symbols for `___stack_chk_guard` and `___stack_chk_fail`. |
@@ -765,7 +765,7 @@ Implemented in [`evaluate_security_posture`](../backend/security.py#L19-L336), M
 
 ### 4.6 Hybrid ARM64 / x86_64 Disassembler & ADRP+ADD Cross-Referencer
 
-Implemented in [`disassemble_window`](../backend/disasm.py#L265-L469) and [`decode_arm64_insn`](../backend/disasm.py#L34-L236), MachOStudio provides a dual-backend disassembly engine:
+Implemented in [`disassemble_window`](../backend/disasm.py#L265-L469) and [`decode_arm64_insn`](../backend/disasm.py#L34-L236), BinaryStudio provides a dual-backend disassembly engine:
 1. **Deterministic Pure-Python AArch64 (`ARM64` / `ARM64e`) Decoder:** Decodes PAC/BTI instructions (`paciasp`, `pacibsp`, `autiasp`, `autibsp`, `retaa`, `retab`, `braa`, `blraa`, `bti`), PC-relative page addressing (`adrp`, `adr`), branches (`b`, `bl`, `b.<cond>`, `cbz`, `cbnz`, `br`, `blr`, `ret`), register-pair stack frames (`stp`, `ldp` with pre/post/signed indexing), loads/stores (`ldr`, `str`, `ldrb`, `strb`, `ldrh`, `strh`), arithmetic/moves (`add`, `sub`, `cmp`, `mov`, `movz`, `movn`, `movk`), and exceptions (`svc`, `brk`, `udf`).
 2. **Automatic `ADRP` + `ADD` Page-Offset Tracker:** As [`disassemble_window`](../backend/disasm.py#L412-L449) walks an ARM64 instruction stream, it tracks register page bases loaded by `adrp Xd, <page_base>`. When a subsequent `add Xd, Xn, #<page_off>` completes the 64-bit pointer calculation ($\text{target\_vm} = \text{page\_base} + \text{page\_off}$), the engine resolves $\text{target\_vm}$ against `__TEXT,__cstring` literals, `LC_SYMTAB`, `LC_FUNCTION_STARTS`, and `LC_DYSYMTAB` indirect symbol stubs (`imp._printf`), annotating the instruction inline.
 3. **`llvm-objdump` / Pure-Python x86_64 & i386 Integration:** For Intel slices in Universal binaries as well as ELF32/64 and Windows PE32/PE32+ binaries, [`disassemble_window`](../backend/disasm.py#L515-L685) pairs system `llvm-objdump` / `objdump` with a built-in zero-dependency **x86 / x86_64 instruction decoder** ([`decode_x86_64_insn`](../backend/disasm.py#L251-L512)) that decodes CET `endbr64`/`endbr32`, REX prefixes, stack frame setup (`push`, `pop`, `sub rsp`), RIP-relative `lea`/`mov`, direct & indirect `call`/`jmp`, and conditional jumps (`je`, `jne`, `jg`, `jl`), automatically cross-referencing RIP-relative and branch targets against symbols, imports, and strings.
@@ -774,7 +774,7 @@ Implemented in [`disassemble_window`](../backend/disasm.py#L265-L469) and [`deco
 
 ## 5. Deep Dive into ELF32 & ELF64 Binary Internals (`backend/elf_parser.py`)
 
-Implemented in [`parse_elf_slice`](../backend/elf_parser.py#L628-L1658), MachOStudio parses **ELF32 (`ELFCLASS32 = 1`)** and **ELF64 (`ELFCLASS64 = 2`)** binaries across Little-Endian (`ELFDATA2LSB = 1`) and Big-Endian (`ELFDATA2MSB = 2`) architectures (`EM_X86_64`, `EM_386`, `EM_AARCH64`, `EM_ARM`, `EM_RISCV`, `EM_PPC64`, `EM_MIPS`).
+Implemented in [`parse_elf_slice`](../backend/elf_parser.py#L628-L1658), BinaryStudio parses **ELF32 (`ELFCLASS32 = 1`)** and **ELF64 (`ELFCLASS64 = 2`)** binaries across Little-Endian (`ELFDATA2LSB = 1`) and Big-Endian (`ELFDATA2MSB = 2`) architectures (`EM_X86_64`, `EM_386`, `EM_AARCH64`, `EM_ARM`, `EM_RISCV`, `EM_PPC64`, `EM_MIPS`).
 
 ### 5.1 Dual-Table Architecture: Program Headers (`Elf_Phdr`) vs. Section Headers (`Elf_Shdr`)
 Unlike Mach-O (where sections are nested inside `LC_SEGMENT_64` load commands), ELF separates the **execution view** from the **linking view**:
@@ -788,7 +788,7 @@ Unlike Mach-O (where sections are nested inside `LC_SEGMENT_64` load commands), 
     - `NT_GNU_PROPERTY_TYPE_0 (5)`: Hardware CFI flags (`GNU_PROPERTY_X86_FEATURE_1_AND = 0xC0000002` for **Intel CET `IBT` & `SHSTK`**, and `GNU_PROPERTY_AARCH64_FEATURE_1_AND = 0xC0000000` for **ARM64 `BTI` & `PAC`**).
   - `PT_GNU_STACK` (`0x6474E551`): Controls stack page permissions (`PF_R | PF_W` = NX stack enforced; `PF_X` set = executable stack vulnerability).
   - `PT_GNU_RELRO` (`0x6474E552`): Region (`[p_vaddr, p_vaddr + p_memsz)`) covering `.init_array`, `.dynamic`, and `.got` that `ld.so` locks `PROT_READ` via `mprotect()` after startup relocations finish.
-- **Section Header Table (`e_shoff`, `e_shnum * e_shentsize`):** Used by linkers and debuggers. MachOStudio resolves section names via `.shstrtab` (`e_shstrndx`), maps each `SHF_ALLOC` section into its enclosing `PT_LOAD` segment, and collects non-allocated metadata sections (`.symtab`, `.strtab`, `.comment`) into a virtual `__ELF_META` group.
+- **Section Header Table (`e_shoff`, `e_shnum * e_shentsize`):** Used by linkers and debuggers. BinaryStudio resolves section names via `.shstrtab` (`e_shstrndx`), maps each `SHF_ALLOC` section into its enclosing `PT_LOAD` segment, and collects non-allocated metadata sections (`.symtab`, `.strtab`, `.comment`) into a virtual `__ELF_META` group.
 
 ### 5.2 9-Point ELF Security Posture Scorecard (`evaluate_elf_security_posture`)
 Implemented in [`evaluate_elf_security_posture`](../backend/elf_parser.py#L373-L625):
@@ -806,7 +806,7 @@ Implemented in [`evaluate_elf_security_posture`](../backend/elf_parser.py#L373-L
 
 ## 6. Deep Dive into Windows PE32 & PE32+ Internals (`backend/pe_parser.py`)
 
-Implemented in [`parse_pe_slice`](../backend/pe_parser.py#L500-L1508), MachOStudio parses 32-bit **PE32 (`0x010B`)** and 64-bit **PE32+ (`0x020B`)** executables (`.exe`), dynamic-link libraries (`.dll`), and kernel drivers (`.sys`).
+Implemented in [`parse_pe_slice`](../backend/pe_parser.py#L500-L1508), BinaryStudio parses 32-bit **PE32 (`0x010B`)** and 64-bit **PE32+ (`0x020B`)** executables (`.exe`), dynamic-link libraries (`.dll`), and kernel drivers (`.sys`).
 
 ### 6.1 MS-DOS Header, XOR-Encrypted Rich Header, and NT Headers
 1. **`IMAGE_DOS_HEADER` (`0x00..0x3F`):** Starts with `e_magic = 0x5A4D ('MZ')` and stores the 32-bit file offset `e_lfanew` at `+0x3C` pointing to `IMAGE_NT_HEADERS`.
@@ -820,7 +820,7 @@ Implemented in [`parse_pe_slice`](../backend/pe_parser.py#L500-L1508), MachOStud
    Decodes `Machine` (`0x8664` AMD64, `0x014C` I386, `0xAA64` ARM64), `TimeDateStamp`, `Characteristics`, `AddressOfEntryPoint`, `ImageBase`, `SectionAlignment` (typically `0x1000`), `FileAlignment` (typically `0x200`), `DllCharacteristics`, and the 16 `IMAGE_DATA_DIRECTORY` entries.
 
 ### 6.2 RVA-to-File-Offset Resolution, IAT/ILT, Forwarded Exports, PDB & Authenticode
-- **RVA $\rightarrow$ File Offset Formula:** Given an RVA $r$, MachOStudio finds the `IMAGE_SECTION_HEADER` $S$ where $S.\text{VirtualAddress} \le r < S.\text{VirtualAddress} + \max(S.\text{VirtualSize}, S.\text{SizeOfRawData})$ and computes:
+- **RVA $\rightarrow$ File Offset Formula:** Given an RVA $r$, BinaryStudio finds the `IMAGE_SECTION_HEADER` $S$ where $S.\text{VirtualAddress} \le r < S.\text{VirtualAddress} + \max(S.\text{VirtualSize}, S.\text{SizeOfRawData})$ and computes:
   $$\text{file\_offset} = S.\text{PointerToRawData} + (r - S.\text{VirtualAddress})$$
 - **Import Table (`IMAGE_DIRECTORY_ENTRY_IMPORT`):** Walks 20-byte `IMAGE_IMPORT_DESCRIPTOR` records, reading the Import Lookup Table (`OriginalFirstThunk` / `ILT`) or Import Address Table (`FirstThunk` / `IAT`). If the MSB (`1 << 63` on PE32+ or `1 << 31` on PE32) is set, the import is by ordinal (`Ordinal#<low16>`); otherwise the entry is an RVA to `IMAGE_IMPORT_BY_NAME` (`Hint` + ASCII function name).
 - **Export Directory (`IMAGE_DIRECTORY_ENTRY_EXPORT`) & Forwarders:** Resolves `AddressOfFunctions`, `AddressOfNames`, and `AddressOfNameOrdinals`. When a function RVA falls *inside* the Export Directory's own `[rva, rva + size)` bounds, PE defines it as a **Forwarded Export**—an ASCII string such as `"NTDLL.RtlAllocateHeap"` redirected by `ntdll.dll` at runtime.

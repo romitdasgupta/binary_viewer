@@ -1,8 +1,8 @@
-# Systems Software & Firmware Binary Analysis Engine Specification
+# BinaryStudio — Systems Software & Firmware Binary Analysis Engine Specification
 
-**Target Path:** `macho_viewer`
+**Project Name:** **BinaryStudio** (`binary_viewer.py` / `macho_viewer.py`)
 **Author:** Principal Systems Software & Firmware Engineer
-**Scope:** Zero-dependency / clean-dependency Mach-O, Universal (Fat), Kernelcache (`MH_FILESET`), Kext, and Firmware (`MH_PRELOAD`) binary parsing, byte-accurate structure layout mapping, security posture auditing, and reverse-engineering utilities.
+**Scope:** Zero-dependency multi-format Mach-O, Universal (Fat), Kernelcache (`MH_FILESET`), Kext, Firmware (`MH_PRELOAD`), Linux ELF32/64, and Windows PE32/PE32+ binary parsing, byte-accurate structure layout mapping, security posture auditing, and reverse-engineering utilities.
 
 ---
 

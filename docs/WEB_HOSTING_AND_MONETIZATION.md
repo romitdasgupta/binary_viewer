@@ -1,6 +1,6 @@
 # Web Hosting, Zero-Trust Security & Monetization Blueprint (Future Sprint)
 
-This document captures the architectural and product blueprint synthesized by the **Product Strategy** and **Systems Security** subagents for hosting **MachOStudio** (`macho_viewer`) as a high-trust, multi-format (`Mach-O`, `ELF32/64`, `Windows PE32/PE32+`) web platform with sustainable monetization in a future sprint.
+This document captures the architectural and product blueprint synthesized by the **Product Strategy** and **Systems Security** subagents for hosting **BinaryStudio** (`binary_viewer.py`) as a high-trust, multi-format (`Mach-O`, `ELF32/64`, `Windows PE32/PE32+`) web platform with sustainable monetization in a future sprint.
 
 ---
 
@@ -13,7 +13,7 @@ When hosting a binary analysis tool on the public web, users upload potentially 
 ```mermaid
 flowchart TB
     subgraph Browser["1. Default Mode: 100% Client-Side Browser Sandbox (Zero-Knowledge)"]
-        UI["MachOStudio Web IDE (DOM + Canvas/SVG)"]
+        UI["BinaryStudio Web IDE (DOM + Canvas/SVG)"]
         Worker["Dedicated Web Worker (Pyodide Wasm Runtime)"]
         Engine["Pure-Python Stdlib Engine<br/>(parser.py, elf_parser.py, pe_parser.py,<br/>semantics.py, pedagogy.py, disasm.py)"]
         UI <-->|"postMessage() RPC"| Worker
@@ -31,7 +31,7 @@ flowchart TB
     UI -.->|"Opt-in: Share Permalink / CI Webhook"| Edge
 ```
 
-#### Why MachOStudio Is Uniquely Suited for WebAssembly (Pyodide)
+#### Why BinaryStudio Is Uniquely Suited for WebAssembly (Pyodide)
 Because the entire backend engine ([`backend/parser.py`](../backend/parser.py), [`backend/elf_parser.py`](../backend/elf_parser.py), [`backend/pe_parser.py`](../backend/pe_parser.py), [`backend/semantics.py`](../backend/semantics.py), [`backend/pedagogy.py`](../backend/pedagogy.py), [`backend/disasm.py`](../backend/disasm.py)) is written in **100% pure Python 3 Standard Library with zero native C extensions**, the entire `backend/` package can run directly inside a browser **Web Worker** via **Pyodide (CPython compiled to WebAssembly)**:
 1. **Zero Data Exfiltration ("Local-Only Privacy Badge"):** By default, dragged-and-dropped binaries never leave the user's browser tab. Enterprise engineers and security researchers can inspect proprietary binaries without violating corporate data-governance policies.
 2. **Zero Server Compute Cost for Free Tier:** Because parsing, entropy calculation, disassembly, and search run on the client's CPU inside a WebAssembly sandbox, serving 100,000+ monthly active free users costs only static CDN bandwidth (Cloudflare Pages / Vercel / S3).
@@ -76,7 +76,7 @@ To grow organically among systems programmers, security researchers, CTF players
 | Tier | Target Audience | Price Point | Included Capabilities |
 | :--- | :--- | :--- | :--- |
 | **Community / Explorer (Free)** | Students, CTF players, open-source developers | **$0 / forever** | • Unlimited **100% Client-Side (Wasm)** inspection of Mach-O, ELF32/64, and PE32/PE32+ files<br/>• Full access to the 6-Stage OS Loader Simulator, Rosetta Stone Matrix & Guided Learning Tours<br/>• Public shareable permalinks (up to 10 MB) |
-| **MachOStudio Pro** | Reverse engineers, malware analysts, mobile/desktop security auditors | **$19 / month** *(or $180 / year)* | • **Private Encrypted Cloud Workspaces** & unlisted/password-protected permalinks (up to 250 MB)<br/>• **Side-by-Side Binary Diffing** (compare headers, sections, entropy, symbols & security posture across two builds)<br/>• **Exportable Audit & Forensics Reports** (PDF / SARIF / JSON) & auto-generated **YARA / ImHex `.hexpat`** rules<br/>• Cloud PDB / `debuginfod` / `.dSYM` symbol server correlation |
+| **BinaryStudio Pro** | Reverse engineers, malware analysts, mobile/desktop security auditors | **$19 / month** *(or $180 / year)* | • **Private Encrypted Cloud Workspaces** & unlisted/password-protected permalinks (up to 250 MB)<br/>• **Side-by-Side Binary Diffing** (compare headers, sections, entropy, symbols & security posture across two builds)<br/>• **Exportable Audit & Forensics Reports** (PDF / SARIF / JSON) & auto-generated **YARA / ImHex `.hexpat`** rules<br/>• Cloud PDB / `debuginfod` / `.dSYM` symbol server correlation |
 | **Team & CI/CD Guard** | AppSec teams, embedded/firmware vendors, game studios | **$79 / seat / month** | • **GitHub Action / GitLab CI Binary Hardening Gate:** Automated PR checks enforcing 9-point Mach-O / ELF / PE security posture policies (failing builds if `PIE`, `RELRO`, `GUARD_CF`, or `CDHash` regress)<br/>• Collaborative team annotations on shared binaries<br/>• REST API keys (`10,000+` automated scans/month) + SSO/SAML |
 | **Academic & Bootcamp License** | University Operating Systems, Compilers & Reverse Engineering courses | **$499 / semester / course** | • Custom **Instructor Guided Tour & Lab Builder** (professors upload custom ELF/PE/Mach-O lab binaries with autograded micro-challenges)<br/>• LMS (Canvas / Gradescope) completion export |
 
@@ -85,8 +85,8 @@ To grow organically among systems programmers, security researchers, CTF players
 ## 4. Implementation Roadmap for the Hosting Sprint
 
 1. **Phase 1 — Client-Side Wasm Bundle (`static/wasm-worker.js`):**
-   - Package `backend/*.py` into an in-browser Pyodide Web Worker so `macho_viewer` can be deployed as a static site on Cloudflare Pages / GitHub Pages with zero backend servers required.
+   - Package `backend/*.py` into an in-browser Pyodide Web Worker so **BinaryStudio** can be deployed as a static site on Cloudflare Pages / GitHub Pages with zero backend servers required.
 2. **Phase 2 — URL Hash Deep-Linking & Exportable Reports:**
    - Sync `state.activeSliceIndex`, `state.selectedNodeId`, and `state.cursorOffset` with `window.location.hash` and add 1-click Markdown/JSON Security Scorecard export.
 3. **Phase 3 — Cloud Permalink API & CI/CD Hardening Action:**
-   - Add `--web-mode` flag to `backend/server.py`, containerize with `Dockerfile` + `seccomp` profile, and publish the `machostudio-security-gate` GitHub Action.
+   - Add `--web-mode` flag to `backend/server.py`, containerize with `Dockerfile` + `seccomp` profile, and publish the `binarystudio-security-gate` GitHub Action.

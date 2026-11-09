@@ -1,7 +1,7 @@
 /**
- * MachOStudio — High-Density Mach-O Binary & Firmware Inspector
+ * BinaryStudio — High-Density Multi-Format Binary, Disassembly & Firmware Inspector
+ * Supports Apple Mach-O (32/64 & Universal Fat), Linux ELF32/64, and Windows PE32/PE32+
  * Frontend Architecture & Interactive State Engine (Vanilla ES6+)
- * Conforms strictly to ADR-001-MACHO-VIEWER
  */
 
 (() => {

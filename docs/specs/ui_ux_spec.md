@@ -1,15 +1,15 @@
-# Mach-O File Viewer — UI/UX & Frontend Architecture Specification
+# BinaryStudio — UI/UX & Frontend Architecture Specification
 
 **Document Status:** Proposed Architecture & Interaction Specification  
 **Author:** Principal UI/UX Designer & Frontend/GUI Architect  
-**Target Workspace:** `macho_viewer`  
-**Design Inspiration:** MachOView, ImHex, Binary Ninja, Xcode Instruments
+**Project Name:** **BinaryStudio** (`binary_viewer.py` / `macho_viewer.py`)  
+**Design Inspiration:** MachOView, ImHex, PE-bear, DIE, Binary Ninja, Xcode Instruments
 
 ---
 
 ## 1. Design Philosophy & Visual Language
 
-Reverse engineering and low-level binary inspection tools fail when they either dump unformatted text (`otool`/`nm` output) or bury byte-level ground truth behind opaque abstractions. Our Mach-O Viewer is built around **four core principles**:
+Reverse engineering and low-level binary inspection tools fail when they either dump unformatted text (`otool`/`nm` output) or bury byte-level ground truth behind opaque abstractions. **BinaryStudio** is built around **four core principles**:
 
 1. **Ground-Truth Byte Traceability:** Every parsed field, load command, symbol, string, or entitlement has a concrete **File Offset (`fileoff`)**, **Byte Length (`size`)**, and (when mapped) **Virtual Memory Address (`vmaddr`)**. Clicking any high-level construct immediately reveals and highlights its exact backing bytes; clicking any byte in the hex view immediately resolves the deepest structural field, section, or symbol that owns it.
 2. **High-Density, Zero-Clutter Typography:**
@@ -220,7 +220,7 @@ To guarantee zero-friction verification and instant utility upon opening the app
 
 ## 4. Technology Stack Options & Architectural Recommendation
 
-We evaluated three candidate GUI architectures for building and delivering the Mach-O Viewer in `macho_viewer`:
+We evaluated three candidate GUI architectures for building and delivering **BinaryStudio**:
 
 ### Option A: Local Python (FastAPI) Backend + Desktop-Class Web GUI (Single-Page App) + Native Window / Browser Launcher
 - **Architecture:**
@@ -251,7 +251,7 @@ We evaluated three candidate GUI architectures for building and delivering the M
 We strongly recommend **Option A** with a **strict contract between the Binary Parser Engine and the Frontend UI**:
 
 1. **Self-Contained, Zero-Friction Delivery:**
-   - The backend serves both the REST/JSON inspection API and the static frontend assets from a single command (`python3 -m macho_viewer` or `./run.sh`).
+   - The backend serves both the REST/JSON inspection API and the static frontend assets from a single command (`python3 binary_viewer.py`).
    - Supporting both **server-side path loading** (`/api/load-path` for `/bin/ls`, `/usr/bin/true`, or any local path) and **drag-and-drop binary upload** (`/api/upload`) gives users the best of native disk access and web ergonomics.
 2. **Exact Byte-Range AST Contract (`Span` Model):**
    - Every parsed structure returned by the backend includes a standardized `span` descriptor:

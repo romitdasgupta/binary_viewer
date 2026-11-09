@@ -1,9 +1,9 @@
-# CTO Architecture Decision Record (ADR) & Integration Contract
+# CTO Architecture Decision Record (ADR) & Integration Contract — BinaryStudio
 
-**Document ID:** `ADR-001-MACHO-VIEWER`  
+**Document ID:** `ADR-001-BINARYSTUDIO`  
 **Status:** **LOCKED / AUTHORITATIVE**  
 **Author:** Chief Technology Officer (CTO Agent)  
-**Target Workspace:** `macho_viewer`  
+**Project Name:** **BinaryStudio** (`binary_viewer.py`, with `macho_viewer.py` compatibility wrapper)  
 **Audience:** Systems & Firmware Engineering (`sys_firmware_eng`), UI/UX & Frontend Architecture (`ui_ux_expert`), QA & Verification
 
 ---
@@ -15,12 +15,12 @@ After reviewing [`systems_firmware_spec.md`](../../docs/specs/systems_firmware_s
 ### 1.1 Tech Stack Decision: Zero-Dependency Python 3 Stdlib Backend + Vanilla ES6 Desktop Web IDE + CLI
 - **Backend Server (`http.server.ThreadingHTTPServer`):**
   - **Decision:** Pure Python 3 Standard Library (`http.server.ThreadingHTTPServer`, `struct`, `json`, `hashlib`, `plistlib`, `urllib.parse`, `subprocess`, `unittest`). **Zero external PyPI dependencies required.**
-  - **Rationale:** System Python 3.9.6 does not have `fastapi` or `uvicorn` pre-installed. Using pure Python standard library (`ThreadingHTTPServer`) guarantees 100% deterministic, zero-friction startup (`python3 macho_viewer.py`) with zero virtual environment or network dependency failures, while supporting concurrent API requests for hex range slicing, disassembly, and address conversion.
+  - **Rationale:** System Python 3.9.6 does not have `fastapi` or `uvicorn` pre-installed. Using pure Python standard library (`ThreadingHTTPServer`) guarantees 100% deterministic, zero-friction startup (`python3 binary_viewer.py`) with zero virtual environment or network dependency failures, while supporting concurrent API requests for hex range slicing, disassembly, and address conversion.
 - **Frontend GUI (`static/index.html`, `static/styles.css`, `static/app.js`):**
   - **Decision:** Self-contained, zero-build-step Vanilla ES6+ Single-Page Application served directly by the Python HTTP server.
   - **Rationale:** Avoids Node/npm/bundler friction while delivering a pixel-accurate, high-density dark-mode IDE (`#0D1117` canvas, tabular monospace typography, dual-track SVG/Canvas memory map ribbon, virtualized 16-byte Hex/ASCII grid, live Data Decoder, real-time VM/File Offset converter bar, and `Cmd+K` global omni-search).
-- **Unified Launcher & CLI (`macho_viewer.py`):**
-  - Supports both **Web GUI Server Mode** (`python3 macho_viewer.py [--port 8421] [--file /bin/ls] [--open]`) and **Headless CLI / JSON Inspection Mode** (`python3 macho_viewer.py --cli <path> [--json] [--slice <arch|idx>] [--disasm <vmaddr>] [--translate <addr>]`).
+- **Unified Launcher & CLI (`binary_viewer.py` & `macho_viewer.py` compatibility wrapper):**
+  - Supports both **Web GUI Server Mode** (`python3 binary_viewer.py [--port 8421] [--file /bin/ls] [--open]`) and **Headless CLI / JSON Inspection Mode** (`python3 binary_viewer.py --cli <path> [--json] [--slice <arch|idx>] [--disasm <vmaddr>] [--translate <addr>]`).
 
 ### 1.2 Test Binary & Synthetic Firmware Fixture Strategy
 To guarantee comprehensive verification across all Mach-O constructs (even for edge cases not present in `/bin/ls` or `/usr/bin/true`), the project will include an automated fixture generator (`tests/build_fixtures.py` or `backend/fixtures.py`) that compiles deterministic Mach-O binaries into `fixtures/` using macOS `clang`, `lipo`, and `codesign`:
@@ -42,11 +42,9 @@ To guarantee comprehensive verification across all Mach-O constructs (even for e
 
 ## 2. Directory & Module Layout
 
-All files reside under `macho_viewer`:
-
 ```text
-
-├── macho_viewer.py                 # Entrypoint: CLI inspector + HTTP Server launcher
+├── binary_viewer.py                # Primary Entrypoint: CLI inspector + HTTP Server launcher
+├── macho_viewer.py                 # Backward-compatible CLI & server wrapper
 ├── README.md                       # Documentation, architecture overview, CLI & GUI usage
 ├── backend/
 │   ├── __init__.py
@@ -68,7 +66,7 @@ All files reside under `macho_viewer`:
 │   ├── synthetic_universal
 │   └── synthetic_firmware.preload
 ├── tests/
-│   └── test_macho_viewer.py        # End-to-end unit & integration test suite (parser, API endpoints, real & synthetic binaries)
+│   └── test_binary_viewer.py       # End-to-end unit & integration test suite (parser, API endpoints, real & synthetic binaries)
 └── docs/
     └── specs/
         ├── systems_firmware_spec.md
@@ -761,7 +759,7 @@ Below is the exact top-level and per-slice JSON schema returned by `/api/parse` 
 ## 6. Parallel Execution & Integration Responsibilities
 
 ### 6.1 Systems & Firmware Engineer (`sys_firmware_eng`)
-- Implement `backend/` modules (`buffer.py`, `constants.py`, `parser.py`, `codesign.py`, `security.py`, `disasm.py`, `service.py`, `fixtures.py`, `server.py`) and `macho_viewer.py` + `tests/test_macho_viewer.py`.
+- Implement `backend/` modules (`buffer.py`, `constants.py`, `parser.py`, `elf_parser.py`, `pe_parser.py`, `codesign.py`, `security.py`, `semantics.py`, `pedagogy.py`, `disasm.py`, `service.py`, `fixtures.py`, `server.py`) and `binary_viewer.py` + `tests/test_binary_viewer.py`.
 - Generate `fixtures/synthetic_universal` and `fixtures/synthetic_firmware.preload` automatically when `fixtures.ensure_fixtures()` runs (or at server startup / test run).
 - Guarantee 100% conformance to the JSON schemas and HTTP endpoints in Sections 3, 4, and 5.
 

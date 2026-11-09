@@ -1,5 +1,6 @@
 """
-Comprehensive End-to-End Unit & Integration Tests for Mach-O Binary Analysis Engine,
+Comprehensive End-to-End Unit & Integration Tests for BinaryStudio Multi-Format Binary Analysis Engine
+(Apple Mach-O, Linux ELF32/64, Windows PE32/PE32+), Semantic Intelligence, Systems Pedagogy,
 Synthetic Fixtures, Code Signature Verifier, Disassembler, HTTP REST API, and CLI.
 """
 
@@ -33,7 +34,7 @@ from backend.server import create_server
 from backend.service import AnalysisService
 
 
-class TestMachOViewerBackend(unittest.TestCase):
+class TestBinaryStudioBackend(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.fixtures = ensure_fixtures(WORKSPACE_ROOT)
@@ -274,26 +275,37 @@ class TestMachOViewerBackend(unittest.TestCase):
             server.server_close()
 
     def test_07_cli_modes(self) -> None:
-        script = os.path.join(WORKSPACE_ROOT, "macho_viewer.py")
+        primary_script = os.path.join(WORKSPACE_ROOT, "binary_viewer.py")
+        compat_script = os.path.join(WORKSPACE_ROOT, "macho_viewer.py")
         for target_bin in (
             self.fixtures["synthetic_firmware"],
             self.fixtures["synthetic_elf64"],
             self.fixtures["synthetic_pe64"],
         ):
             proc = subprocess.run(
-                [sys.executable, script, "--cli", target_bin, "--disasm"],
+                [sys.executable, primary_script, "--cli", target_bin, "--disasm"],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             self.assertEqual(proc.returncode, 0)
-            self.assertIn("Binary Analysis Report", proc.stdout)
+            self.assertIn("BinaryStudio — Multi-Format Binary Analysis Report", proc.stdout)
             self.assertIn("Semantic Intelligence & Provenance", proc.stdout)
             self.assertIn("Disassembly Preview", proc.stdout)
 
+        # Also verify backward-compatible macho_viewer.py wrapper
+        compat_proc = subprocess.run(
+            [sys.executable, compat_script, "--cli", self.fixtures["synthetic_elf64"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(compat_proc.returncode, 0)
+        self.assertIn("BinaryStudio — Multi-Format Binary Analysis Report", compat_proc.stdout)
+
     def test_08_cross_validate_against_otool_and_codesign(self) -> None:
         """
-        Cross-validates MachOStudio's parsed header fields (ncmds, sizeofcmds, flags),
+        Cross-validates BinaryStudio's parsed header fields (ncmds, sizeofcmds, flags),
         segment layouts (vmaddr, vmsize, fileoff, filesize, nsects), LC_UUID, and
         LC_CODE_SIGNATURE CDHash/Identifier against macOS `/usr/bin/otool` and `/usr/bin/codesign`.
         """
@@ -626,7 +638,7 @@ class TestMachOViewerBackend(unittest.TestCase):
         cs64 = sl64["code_signature_detail"]
         self.assertTrue(cs64["present"])
         certs = cs64["cms_signature"]["certificates"]
-        self.assertTrue(any("MachOStudio Synthetic Corp" in c["subject_cn"] for c in certs))
+        self.assertTrue(any("BinaryStudio Synthetic Corp" in c["subject_cn"] for c in certs))
 
         # Verify PE32+ Security Posture (ASLR + High-Entropy VA + DEP + CFG + /GS Cookie + Authenticode)
         sec64 = sl64["security_posture"]

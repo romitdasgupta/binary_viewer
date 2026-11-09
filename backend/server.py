@@ -33,7 +33,7 @@ def _int_param(qs: Dict[str, Any], key: str, default: int = 0) -> int:
         return default
 
 
-class MachOViewerRequestHandler(BaseHTTPRequestHandler):
+class BinaryStudioRequestHandler(BaseHTTPRequestHandler):
     service: AnalysisService = None  # Attached by create_server()
     static_dir: str = ""
 
@@ -234,6 +234,9 @@ class MachOViewerRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+MachOViewerRequestHandler = BinaryStudioRequestHandler
+
+
 def create_server(
     workspace_root: str,
     host: str = "127.0.0.1",
@@ -247,7 +250,7 @@ def create_server(
 
     static_dir = os.path.join(os.path.abspath(workspace_root), "static")
 
-    class BoundHandler(MachOViewerRequestHandler):
+    class BoundHandler(BinaryStudioRequestHandler):
         pass
 
     BoundHandler.service = service

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MachOStudio — Multi-Format Binary Inspector (Mach-O, ELF32/64 &amp; Windows PE)</title>
+  <title>BinaryStudio — Multi-Format Binary Inspector &amp; Disassembler (Mach-O, ELF32/64 &amp; Windows PE)</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -64,9 +64,9 @@
     <!-- 1. TOP GLOBAL TOOLBAR (42px) -->
     <header class="top-toolbar">
       <div class="brand-cluster">
-        <div class="brand-logo" title="MachOStudio Multi-Format Binary &amp; Systems Architecture Suite">
+        <div class="brand-logo" title="BinaryStudio Multi-Format Binary &amp; Systems Architecture Suite">
           <span id="brand-format-badge" class="brand-hex">0xFEEDFACF</span>
-          <span class="brand-name">MachO<span class="brand-accent">Studio</span></span>
+          <span class="brand-name">Binary<span class="brand-accent">Studio</span></span>
         </div>
 
         <div class="toolbar-divider"></div>
@@ -264,7 +264,7 @@
           <button id="btn-tree-clear" class="tree-clear-btn hidden" title="Clear filter">×</button>
         </div>
 
-        <div id="structure-tree" class="structure-tree" role="tree" aria-label="Mach-O Binary Structure Tree">
+        <div id="structure-tree" class="structure-tree" role="tree" aria-label="BinaryStudio Structure Tree">
           <!-- Populated dynamically by app.js -->
         </div>
       </aside>
@@ -367,7 +367,7 @@
     <footer class="status-bar">
       <div class="status-left">
         <span class="status-indicator" id="status-dot"></span>
-        <span id="status-text">Initializing MachOStudio…</span>
+        <span id="status-text">Initializing BinaryStudio…</span>
         <span class="status-sep">|</span>
         <span id="status-file" class="status-mono">No file loaded</span>
         <span class="status-sep">|</span>
