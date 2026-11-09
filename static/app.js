@@ -3157,7 +3157,10 @@
     // 3. File Upload Input & Full-Window Drag-and-Drop
     document.getElementById('file-upload-input').addEventListener('change', (e) => {
       const file = e.target.files?.[0];
-      if (file) uploadBinaryFile(file);
+      if (file) {
+        uploadBinaryFile(file);
+        e.target.value = '';
+      }
     });
 
     const dropOverlay = document.getElementById('dropzone-overlay');
