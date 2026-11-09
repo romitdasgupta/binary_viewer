@@ -16,3 +16,6 @@ fixtures/*.c
 fixtures/*.m
 fixtures/*.cpp
 fixtures/*.slice
+
+# Local CLI state
+.antigravitycli/

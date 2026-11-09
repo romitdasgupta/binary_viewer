@@ -2204,3 +2204,189 @@ pre,
 .tt-row strong {
   color: var(--text-primary);
 }
+
+/* ==========================================================================
+   Semantic Intelligence, Entropy Heatmap & Pedagogy Learning Layers
+   ========================================================================== */
+.btn-learn {
+  background: var(--hdr-bg);
+  border-color: var(--hdr-border);
+  color: var(--hdr-fg);
+  font-weight: 600;
+}
+.btn-learn:hover {
+  background: rgba(163, 113, 247, 0.28);
+  border-color: var(--hdr-fg);
+  color: var(--text-bright);
+}
+
+.entropy-sparkline-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.entropy-sparkline-bars {
+  display: flex;
+  align-items: flex-end;
+  height: 76px;
+  gap: 2px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 6px 6px 0 6px;
+}
+
+.entropy-bar {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  cursor: pointer;
+  transition: opacity 0.1s, transform 0.1s;
+}
+.entropy-bar:hover {
+  opacity: 0.85;
+  transform: scaleY(1.04);
+}
+.ent-sparse     { background: #484f58; }
+.ent-structured { background: var(--ro-fg); }
+.ent-code       { background: var(--rx-fg); }
+.ent-dense      { background: var(--rw-fg); }
+.ent-packed     { background: var(--danger-fg); }
+
+.byte-class-stacked-bar {
+  display: flex;
+  height: 18px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 10px;
+  padding: 12px;
+}
+
+.cap-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cap-evidence-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.pedagogy-inline-box {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: rgba(163, 113, 247, 0.1);
+  border-left: 3px solid var(--hdr-fg);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pedagogy-inline-box strong {
+  color: var(--hdr-fg);
+}
+
+.decoder-pedagogy-box {
+  margin-top: 3px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  background: rgba(163, 113, 247, 0.12);
+  border: 1px solid var(--hdr-border);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  color: var(--text-primary);
+  line-height: 1.35;
+}
+
+.lifecycle-stepper {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.lifecycle-stage-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.12s;
+}
+.lifecycle-stage-card:hover {
+  border-color: var(--rx-fg);
+}
+
+.stage-num-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--rx-bg);
+  color: var(--rx-fg);
+  border: 1px solid var(--rx-border);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.tour-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--hdr-border);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quiz-option-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  margin-top: 4px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.quiz-option-btn:hover {
+  border-color: var(--rx-fg);
+  background: var(--bg-hover);
+}
+.quiz-option-btn.correct {
+  background: var(--ro-bg);
+  border-color: var(--ro-fg);
+  color: var(--ro-fg);
+  font-weight: 600;
+}
+.quiz-option-btn.wrong {
+  background: var(--danger-bg);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
+}

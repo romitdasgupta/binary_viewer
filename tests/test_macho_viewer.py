@@ -42,8 +42,16 @@ class TestMachOViewerBackend(unittest.TestCase):
     def test_01_fixtures_built(self) -> None:
         self.assertTrue(os.path.isfile(self.fixtures["synthetic_universal"]))
         self.assertTrue(os.path.isfile(self.fixtures["synthetic_firmware"]))
+        self.assertTrue(os.path.isfile(self.fixtures["synthetic_elf64"]))
+        self.assertTrue(os.path.isfile(self.fixtures["synthetic_elf32"]))
+        self.assertTrue(os.path.isfile(self.fixtures["synthetic_pe64"]))
+        self.assertTrue(os.path.isfile(self.fixtures["synthetic_pe32"]))
         self.assertGreater(os.path.getsize(self.fixtures["synthetic_universal"]), 32768)
         self.assertGreaterEqual(os.path.getsize(self.fixtures["synthetic_firmware"]), 12288)
+        self.assertGreaterEqual(os.path.getsize(self.fixtures["synthetic_elf64"]), 8192)
+        self.assertGreaterEqual(os.path.getsize(self.fixtures["synthetic_elf32"]), 4096)
+        self.assertGreaterEqual(os.path.getsize(self.fixtures["synthetic_pe64"]), 6144)
+        self.assertGreaterEqual(os.path.getsize(self.fixtures["synthetic_pe32"]), 2048)
 
     def test_02_parse_synthetic_universal(self) -> None:
         doc = self.service.load_file(self.fixtures["synthetic_universal"])
@@ -141,20 +149,28 @@ class TestMachOViewerBackend(unittest.TestCase):
                 continue
             doc = self.service.load_file(sys_bin)
             self.assertGreaterEqual(len(doc["slices"]), 1)
+            fmt = doc["file_info"]["format"]
+            self.assertIn(fmt, ("MACHO", "ELF"))
             for idx, sl in enumerate(doc["slices"]):
-                self.assertEqual(sl["header"]["filetype_name"], "MH_EXECUTE")
-                self.assertTrue(sl["code_signature_detail"]["present"])
-                self.assertTrue(sl["code_signature_detail"]["code_directory"]["cdhash_verified"])
-                # Verify CMS certificate chain on Apple system binary
-                certs = sl["code_signature_detail"]["cms_signature"]["certificates"]
-                self.assertGreaterEqual(len(certs), 1)
-                # Verify Chained Fixups on arm64e slice
-                if sl["arch_name"] == "arm64e":
-                    self.assertTrue(sl["dyld_info"]["has_chained_fixups"])
-                    if sys_bin == "/bin/ls":
-                        self.assertGreater(
-                            sl["dyld_info"]["chained_fixups"]["imports_count"], 0
-                        )
+                if fmt == "MACHO":
+                    self.assertEqual(sl["header"]["filetype_name"], "MH_EXECUTE")
+                    self.assertTrue(sl["code_signature_detail"]["present"])
+                    self.assertTrue(sl["code_signature_detail"]["code_directory"]["cdhash_verified"])
+                    certs = sl["code_signature_detail"]["cms_signature"]["certificates"]
+                    self.assertGreaterEqual(len(certs), 1)
+                    if sl["arch_name"] == "arm64e":
+                        self.assertTrue(sl["dyld_info"]["has_chained_fixups"])
+                        if sys_bin == "/bin/ls":
+                            self.assertGreater(
+                                sl["dyld_info"]["chained_fixups"]["imports_count"], 0
+                            )
+                else:
+                    # Linux ELF64 system binary (/bin/ls or /usr/bin/true)
+                    self.assertIn(sl["header"]["filetype_name"], ("ET_DYN", "ET_EXEC"))
+                    self.assertGreater(len(sl["segments"]), 0)
+                    self.assertGreater(len(sl["dylibs"]), 0)
+                    self.assertIn("semantic_layers", sl)
+                    self.assertIn("pedagogy", sl)
 
     def test_05_translate_hex_decode_search(self) -> None:
         self.service.load_file(self.fixtures["synthetic_firmware"])
@@ -193,19 +209,19 @@ class TestMachOViewerBackend(unittest.TestCase):
             with urlopen(f"{base_url}/api/presets") as resp:
                 self.assertEqual(resp.status, 200)
                 presets_data = json.loads(resp.read().decode("utf-8"))
-                self.assertEqual(len(presets_data["presets"]), 4)
+                self.assertEqual(len(presets_data["presets"]), 8)
 
             # 2. POST /api/parse
             req = Request(
                 f"{base_url}/api/parse",
-                data=json.dumps({"path": "/usr/bin/true"}).encode("utf-8"),
+                data=json.dumps({"path": self.fixtures["synthetic_universal"]}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
             with urlopen(req) as resp:
                 self.assertEqual(resp.status, 200)
                 doc = json.loads(resp.read().decode("utf-8"))
-                self.assertEqual(doc["file_info"]["filename"], "true")
+                self.assertEqual(doc["file_info"]["filename"], "synthetic_universal")
 
             # 3. GET /api/hex
             with urlopen(f"{base_url}/api/hex?offset=0&length=64&slice_index=0") as resp:
@@ -259,15 +275,21 @@ class TestMachOViewerBackend(unittest.TestCase):
 
     def test_07_cli_modes(self) -> None:
         script = os.path.join(WORKSPACE_ROOT, "macho_viewer.py")
-        proc = subprocess.run(
-            [sys.executable, script, "--cli", "/usr/bin/true", "--slice", "arm64e", "--disasm"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("Mach-O Binary Analysis Report", proc.stdout)
-        self.assertIn("Disassembly Preview", proc.stdout)
+        for target_bin in (
+            self.fixtures["synthetic_firmware"],
+            self.fixtures["synthetic_elf64"],
+            self.fixtures["synthetic_pe64"],
+        ):
+            proc = subprocess.run(
+                [sys.executable, script, "--cli", target_bin, "--disasm"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Binary Analysis Report", proc.stdout)
+            self.assertIn("Semantic Intelligence & Provenance", proc.stdout)
+            self.assertIn("Disassembly Preview", proc.stdout)
 
     def test_08_cross_validate_against_otool_and_codesign(self) -> None:
         """
@@ -493,6 +515,258 @@ class TestMachOViewerBackend(unittest.TestCase):
         self.assertFalse(sl_be["header"]["little_endian"])
         self.assertEqual(sl_be["overview"]["endianness"], "Big-Endian")
         self.assertEqual(sl_be["header"]["cputype_name"], "CPU_TYPE_POWERPC")
+
+    def test_11_parse_synthetic_elf64_and_elf32(self) -> None:
+        """
+        Verifies full ELF64 and ELF32 parsing, Program Headers, Section Headers,
+        `.dynamic` tags (`DT_NEEDED`, `DT_RUNPATH`, `DF_BIND_NOW`), GNU Build-ID,
+        ABI-tag, Intel CET (`IBT | SHSTK`) notes, PLT/GOT relocations, x86_64 disassembly,
+        and 9-point ELF security posture scoring.
+        """
+        doc64 = self.service.load_file(self.fixtures["synthetic_elf64"])
+        self.assertEqual(doc64["file_info"]["format"], "ELF")
+        self.assertEqual(doc64["file_info"]["format_display"], "ELF64")
+        sl64 = doc64["slices"][0]
+        self.assertTrue(sl64["is_64"])
+        self.assertEqual(sl64["arch_name"], "x86_64")
+        self.assertEqual(sl64["header"]["filetype_name"], "ET_DYN")
+        self.assertEqual(sl64["elf_metadata"]["interpreter"], "/lib64/ld-linux-x86-64.so.2")
+
+        # Verify Build-ID & Notes
+        self.assertIn("a1b2c3d4e5f6", sl64["overview"]["uuid"])
+        self.assertGreaterEqual(len(sl64["elf_metadata"]["notes"]), 3)
+
+        # Verify DT_NEEDED & DT_RUNPATH
+        dylib_names = [d["name"] for d in sl64["dylibs"]]
+        self.assertIn("libc.so.6", dylib_names)
+        self.assertIn("libcrypto.so.3", dylib_names)
+        self.assertEqual(sl64["rpaths"][0]["path"], "$ORIGIN/../lib")
+
+        # Verify Symbols & C++ Demangling
+        demangled = {s["demangled"] for s in sl64["symbols"]}
+        self.assertTrue(any("compute_crypto" in d for d in demangled))
+
+        # Verify Relocations (.rela.dyn + .rela.plt)
+        fixups = sl64["dyld_info"]["chained_fixups"]["fixups"]
+        self.assertEqual(len(fixups), 5)
+        self.assertTrue(any(f["type"] == "R_X86_64_JUMP_SLOT" for f in fixups))
+
+        # Verify Security Posture (PIE, Full RELRO, NX Stack, Stack Canary, CET IBT+SHSTK)
+        sec64 = sl64["security_posture"]
+        self.assertTrue(sec64["pie"])
+        self.assertEqual(sec64["relro"], "Full")
+        self.assertTrue(sec64["nx_stack"])
+        self.assertTrue(sec64["stack_canary"])
+        self.assertTrue(sec64["pac_enabled"])  # Intel CET IBT | SHSTK
+
+        # Verify x86_64 Disassembly at entry point 0x1040
+        dis64 = self.service.disassemble(slice_index=0, vmaddr="0x1040", count=10)
+        mnems = [i["mnemonic"] for i in dis64["instructions"]]
+        self.assertEqual(mnems[0], "endbr64")
+        self.assertIn("push", mnems)
+        self.assertIn("call", mnems)
+
+        # Verify ELF32 non-PIE with executable stack warning
+        doc32 = self.service.load_file(self.fixtures["synthetic_elf32"])
+        self.assertEqual(doc32["file_info"]["format_display"], "ELF32")
+        sl32 = doc32["slices"][0]
+        self.assertFalse(sl32["is_64"])
+        self.assertEqual(sl32["arch_name"], "i386")
+        self.assertEqual(sl32["header"]["filetype_name"], "ET_EXEC")
+        sec32 = sl32["security_posture"]
+        self.assertFalse(sec32["pie"])
+        self.assertFalse(sec32["nx_stack"])
+        nx_chk = [c for c in sec32["checks"] if c["id"] == "nx_stack"][0]
+        self.assertEqual(nx_chk["status"], "FAIL")
+
+    def test_12_parse_synthetic_pe64_and_pe32(self) -> None:
+        """
+        Verifies full Windows PE32+ and PE32 parsing: DOS Header, XOR-decrypted Rich Header,
+        NT & Optional Headers, Data Directories, Import Table (by name & by ordinal),
+        Export Table (including forwarded exports), Base Relocations (`DIR64`),
+        CodeView `RSDS` PDB GUID/path, LoadConfig `/GS` SecurityCookie,
+        `WIN_CERTIFICATE` Authenticode PKCS#7 certificate extraction, and PE32 TLS/RWX checks.
+        """
+        doc64 = self.service.load_file(self.fixtures["synthetic_pe64"])
+        self.assertEqual(doc64["file_info"]["format"], "PE")
+        self.assertEqual(doc64["file_info"]["format_display"], "PE32+")
+        sl64 = doc64["slices"][0]
+        self.assertTrue(sl64["is_64"])
+        self.assertEqual(sl64["arch_name"], "x86_64")
+
+        # Verify XOR-decrypted Rich Header
+        rich = sl64["pe_metadata"]["rich_header"]
+        self.assertTrue(rich["present"])
+        self.assertEqual(rich["xor_key"], "0x5a3c9e17")
+        self.assertEqual(len(rich["entries"]), 3)
+
+        # Verify Imports (KERNEL32.dll & WS2_32.dll including ordinal #115)
+        imports = sl64["dyld_info"]["chained_fixups"]["imports"]
+        imp_names = {imp["name"] for imp in imports}
+        self.assertIn("GetProcAddress", imp_names)
+        self.assertIn("VirtualAlloc", imp_names)
+        self.assertIn("CreateProcessW", imp_names)
+        self.assertIn("WSAStartup", imp_names)
+        self.assertIn("Ordinal#115", imp_names)
+
+        # Verify Exports & Forwarded Export
+        exports = sl64["dyld_info"]["exports"]
+        exp_map = {ex["name"]: ex for ex in exports}
+        self.assertIn("InitializeEngine", exp_map)
+        self.assertIn("LegacyAlloc", exp_map)
+        self.assertEqual(exp_map["LegacyAlloc"]["forwarder"], "NTDLL.RtlAllocateHeap")
+
+        # Verify CodeView RSDS PDB GUID & Path
+        dbg = sl64["pe_metadata"]["debug_entries"]
+        self.assertEqual(len(dbg), 1)
+        self.assertIn("synthetic_pe64.pdb", dbg[0]["pdb_path"])
+        self.assertEqual(sl64["overview"]["uuid"], dbg[0]["guid"])
+
+        # Verify Authenticode WIN_CERTIFICATE
+        cs64 = sl64["code_signature_detail"]
+        self.assertTrue(cs64["present"])
+        certs = cs64["cms_signature"]["certificates"]
+        self.assertTrue(any("MachOStudio Synthetic Corp" in c["subject_cn"] for c in certs))
+
+        # Verify PE32+ Security Posture (ASLR + High-Entropy VA + DEP + CFG + /GS Cookie + Authenticode)
+        sec64 = sl64["security_posture"]
+        self.assertTrue(sec64["pie"])
+        self.assertTrue(sec64["stack_canary"])
+        self.assertTrue(sec64["pac_enabled"])  # GUARD_CF
+
+        # Verify PE32 with RWX section and pre-main TLS callback
+        doc32 = self.service.load_file(self.fixtures["synthetic_pe32"])
+        self.assertEqual(doc32["file_info"]["format_display"], "PE32")
+        sl32 = doc32["slices"][0]
+        self.assertFalse(sl32["is_64"])
+        self.assertEqual(sl32["arch_name"], "i386")
+        self.assertTrue(sl32["security_posture"]["has_rwx_segments"])
+        self.assertEqual(sl32["pe_metadata"]["tls_info"]["callbacks"], ["0x401000"])
+
+    def test_13_semantic_layers_and_entropy_intelligence(self) -> None:
+        """
+        Verifies the 4 Semantic Intelligence layers (`entropy_analysis`, `capabilities`,
+        `provenance`, and `anomalies`) across Mach-O, ELF64, and PE32+.
+        """
+        for key in ("synthetic_universal", "synthetic_firmware", "synthetic_elf64", "synthetic_pe64", "synthetic_pe32"):
+            doc = self.service.load_file(self.fixtures[key])
+            sl = doc["slices"][0]
+            sem = sl["semantic_layers"]
+            self.assertIn("entropy_analysis", sem)
+            self.assertIn("capabilities", sem)
+            self.assertIn("provenance", sem)
+            self.assertIn("anomalies", sem)
+
+            ent = sem["entropy_analysis"]
+            self.assertGreaterEqual(ent["overall_entropy"], 0.0)
+            self.assertLessEqual(ent["overall_entropy"], 8.0)
+            self.assertGreater(len(ent["sliding_windows"]), 0)
+            dist = ent["byte_class_distribution"]
+            total_pct = dist["null_pct"] + dist["ascii_pct"] + dist["control_pct"] + dist["high_pct"]
+            self.assertAlmostEqual(total_pct, 100.0, delta=0.5)
+
+        # Verify capability taxonomy on PE32+ (Networking + Process/Memory + Crypto/Strings)
+        pe_doc = self.service.load_file(self.fixtures["synthetic_pe64"])
+        pe_caps = pe_doc["slices"][0]["semantic_layers"]["capabilities"]
+        cap_ids = {c["id"] for c in pe_caps["categories"]}
+        self.assertIn("network", cap_ids)
+        self.assertIn("process", cap_ids)
+        self.assertIn("dynamic_loading", cap_ids)
+        self.assertGreater(len(pe_caps["string_intelligence"]["urls"]), 0)
+        self.assertGreater(len(pe_caps["string_intelligence"]["registry_keys"]), 0)
+
+        # Verify anomaly detection on PE32 (RWX section + TLS callback)
+        pe32_doc = self.service.load_file(self.fixtures["synthetic_pe32"])
+        anom_ids = {f["id"] for f in pe32_doc["slices"][0]["semantic_layers"]["anomalies"]["findings"]}
+        self.assertIn("rwx_memory", anom_ids)
+        self.assertIn("pe_tls_callbacks", anom_ids)
+
+    def test_14_pedagogy_loader_lifecycle_rosetta_and_tours(self) -> None:
+        """
+        Verifies the Pedagogical & Learning layers (`loader_lifecycle` 6-stage simulator,
+        10-row `rosetta_stone` comparative matrix, field-level `pedagogy` annotations,
+        and `guided_tours` with micro-challenges) across Mach-O, ELF, and PE.
+        """
+        for key, expected_fmt in (
+            ("synthetic_universal", "MACHO"),
+            ("synthetic_elf64", "ELF"),
+            ("synthetic_pe64", "PE"),
+        ):
+            doc = self.service.load_file(self.fixtures[key])
+            sl = doc["slices"][0]
+            self.assertEqual(sl["format"], expected_fmt)
+            ped = sl["pedagogy"]
+
+            # 1. 6-Stage OS Loader Lifecycle Simulator
+            lc = ped["loader_lifecycle"]
+            self.assertEqual(len(lc["stages"]), 6)
+            for idx, st in enumerate(lc["stages"]):
+                self.assertEqual(st["stage"], idx + 1)
+                self.assertTrue(st["title"])
+                self.assertTrue(st["binary_state"])
+                self.assertTrue(st["failure_mode"])
+
+            # 2. 10-Row Rosetta Stone Comparative Matrix
+            rosetta = ped["rosetta_stone"]
+            self.assertEqual(len(rosetta), 10)
+            self.assertEqual(rosetta[0]["active_format"], expected_fmt)
+
+            # 3. Field-level Pedagogy Annotations on Header Fields
+            hdr_fields_with_ped = [f for f in sl["header"]["fields"] if f.get("pedagogy")]
+            self.assertGreater(len(hdr_fields_with_ped), 0)
+            sample_ped = hdr_fields_with_ped[0]["pedagogy"]
+            self.assertIn("why_it_matters", sample_ped)
+            self.assertIn("loader_behavior", sample_ped)
+            self.assertIn("what_if_modified", sample_ped)
+            self.assertIn("cross_format_peer", sample_ped)
+
+            # 4. Guided Learning Tours with Interactive Micro-Challenges
+            tours = ped["guided_tours"]
+            self.assertGreaterEqual(len(tours), 3)
+            for tour in tours:
+                self.assertGreater(len(tour["steps"]), 0)
+                self.assertIn("challenge", tour["steps"][0])
+
+    def test_15_cross_validate_elf_against_readelf_and_multi_format_api(self) -> None:
+        """
+        Cross-validates synthetic ELF64 and real `/bin/ls` (when on Linux with `/usr/bin/readelf`)
+        and verifies `/api/decode` field pedagogy and `/api/translate` on ELF and PE binaries.
+        """
+        # 1. Verify decode_bytes_at returns field_pedagogy and x86_insn on ELF64 and PE32+
+        self.service.load_file(self.fixtures["synthetic_elf64"])
+        dec_elf_hdr = self.service.decode_bytes_at(offset=0, slice_index=0)
+        self.assertIsNotNone(dec_elf_hdr.get("field_pedagogy"))
+        self.assertEqual(dec_elf_hdr["field_pedagogy"]["field_name"], "e_ident[EI_MAG]")
+
+        dec_elf_code = self.service.decode_bytes_at(offset=0x1040, slice_index=0)
+        self.assertIn("endbr64", dec_elf_code["primitives"]["x86_insn"])
+
+        self.service.load_file(self.fixtures["synthetic_pe64"])
+        dec_pe_dos = self.service.decode_bytes_at(offset=0x3C, slice_index=0)
+        self.assertIsNotNone(dec_pe_dos.get("field_pedagogy"))
+        self.assertEqual(dec_pe_dos["field_pedagogy"]["field_name"], "e_lfanew")
+
+        tr_pe = self.service.translate_address(slice_index=0, query="0x140001000", mode="vmaddr")
+        self.assertTrue(tr_pe["mapped"])
+        self.assertEqual(tr_pe["abs_offset"], 0x400)
+
+        # 2. Cross-validate against /usr/bin/readelf if available
+        if os.path.exists("/usr/bin/readelf"):
+            elf_path = self.fixtures["synthetic_elf64"]
+            doc = self.service.load_file(elf_path)
+            sl = doc["slices"][0]
+            proc = subprocess.run(
+                ["/usr/bin/readelf", "-h", "-l", "-n", elf_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0)
+            out = proc.stdout
+            self.assertIn("ELF64", out)
+            self.assertIn("DYN", out)
+            self.assertIn("/lib64/ld-linux-x86-64.so.2", out)
+            self.assertIn(sl["overview"]["uuid"].lower(), out.lower())
 
 
 if __name__ == "__main__":

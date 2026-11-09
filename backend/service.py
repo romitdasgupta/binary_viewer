@@ -10,7 +10,7 @@ import struct
 from typing import Any, Dict, List, Optional, Tuple
 
 from .buffer import BinaryBuffer
-from .disasm import decode_single_arm64_preview, disassemble_window
+from .disasm import decode_single_arm64_preview, decode_x86_64_insn, disassemble_window
 from .parser import parse_macho_bytes, parse_macho_file
 
 
@@ -23,33 +23,65 @@ class AnalysisService:
     def get_presets(self) -> List[Dict[str, Any]]:
         synth_univ = os.path.join(self.workspace_root, "fixtures", "synthetic_universal")
         synth_fw = os.path.join(self.workspace_root, "fixtures", "synthetic_firmware.preload")
+        synth_elf64 = os.path.join(self.workspace_root, "fixtures", "synthetic_elf64")
+        synth_elf32 = os.path.join(self.workspace_root, "fixtures", "synthetic_elf32")
+        synth_pe64 = os.path.join(self.workspace_root, "fixtures", "synthetic_pe64.exe")
+        synth_pe32 = os.path.join(self.workspace_root, "fixtures", "synthetic_pe32.exe")
         presets = [
             {
                 "id": "synthetic_universal",
-                "label": "Synthetic Universal (arm64 + x86_64)",
+                "label": "Mach-O: Universal (arm64 + x86_64)",
                 "path": synth_univ,
-                "description": "Multi-arch test binary with custom segments, C++/ObjC symbols, chained fixups & entitlements",
+                "description": "Multi-arch Mach-O binary with custom segments, C++/ObjC symbols, chained fixups & entitlements",
                 "exists": os.path.isfile(synth_univ),
             },
             {
                 "id": "synthetic_firmware",
-                "label": "Synthetic Firmware (MH_PRELOAD)",
+                "label": "Mach-O: Firmware (MH_PRELOAD)",
                 "path": synth_fw,
                 "description": "Standalone ARM64 firmware image with LC_UNIXTHREAD state and RWX segment warning",
                 "exists": os.path.isfile(synth_fw),
             },
             {
+                "id": "synthetic_elf64",
+                "label": "ELF64: Linux Service PIE (x86_64)",
+                "path": synth_elf64,
+                "description": "Hardened 64-bit Linux PIE with Full RELRO, Intel CET (IBT/SHSTK), Build-ID & PLT/GOT relocations",
+                "exists": os.path.isfile(synth_elf64),
+            },
+            {
+                "id": "synthetic_elf32",
+                "label": "ELF32: Legacy i386 Executable",
+                "path": synth_elf32,
+                "description": "32-bit x86 ET_EXEC binary with non-PIE fixed base and executable stack warning",
+                "exists": os.path.isfile(synth_elf32),
+            },
+            {
+                "id": "synthetic_pe64",
+                "label": "PE32+: Windows 64-bit (x86_64)",
+                "path": synth_pe64,
+                "description": "Windows PE32+ with Rich Header, ASLR/DEP/CFG, IAT Imports, Forwarded Exports, RSDS PDB & Authenticode",
+                "exists": os.path.isfile(synth_pe64),
+            },
+            {
+                "id": "synthetic_pe32",
+                "label": "PE32: Windows 32-bit (i386 + TLS/RWX)",
+                "path": synth_pe32,
+                "description": "32-bit Windows PE32 with pre-main TLS Callback and RWX section anomaly",
+                "exists": os.path.isfile(synth_pe32),
+            },
+            {
                 "id": "bin_ls",
                 "label": "/bin/ls",
                 "path": "/bin/ls",
-                "description": "macOS Universal system utility (arm64e PAC + x86_64) with Apple Code Signature",
+                "description": "Host system /bin/ls executable (Mach-O on macOS / ELF64 on Linux)",
                 "exists": os.path.isfile("/bin/ls"),
             },
             {
                 "id": "usr_bin_true",
                 "label": "/usr/bin/true",
                 "path": "/usr/bin/true",
-                "description": "Minimal macOS Universal Mach-O executable",
+                "description": "Host system /usr/bin/true minimal executable",
                 "exists": os.path.isfile("/usr/bin/true"),
             },
         ]
@@ -215,7 +247,7 @@ class AnalysisService:
             best_sym = None
             best_delta = None
             for sym in slice_obj.get("symbols", []):
-                if sym["type_name"] == "SECT" and not sym["is_stab"] and sym["n_value_int"] > 0:
+                if not sym.get("is_stab") and sym.get("n_value_int", 0) > 0:
                     delta = vmaddr_val - sym["n_value_int"]
                     if 0 <= delta < 0x100000:
                         if best_delta is None or delta < best_delta:
@@ -384,6 +416,13 @@ class AnalysisService:
             raw_bytes[abs_off : min(file_size, abs_off + 4)],
             vm_val if vm_val is not None else abs_off,
         )
+        x86_len, x86_mnem, x86_ops, _, _ = decode_x86_64_insn(
+            raw_bytes[abs_off : min(file_size, abs_off + 15)],
+            0,
+            vm_val if vm_val is not None else abs_off,
+            is_64=bool(slice_obj.get("is_64", True)),
+        )
+        x86_str = f"{x86_mnem} {x86_ops}".strip() if x86_len > 0 else "N/A"
 
         # Build structural breadcrumbs from largest enclosing container down to exact field
         breadcrumbs: List[Dict[str, Any]] = []
@@ -419,6 +458,7 @@ class AnalysisService:
             for sect in seg.get("sections", []):
                 all_field_lists.append(sect.get("fields", []))
 
+        matched_field_pedagogy = None
         for flist in all_field_lists:
             for f_obj in flist:
                 if f_obj["abs_offset"] <= abs_off < f_obj["abs_offset"] + f_obj["size"]:
@@ -428,6 +468,12 @@ class AnalysisService:
                         "abs_offset": f_obj["abs_offset"],
                         "size": f_obj["size"],
                     })
+                    if f_obj.get("pedagogy"):
+                        matched_field_pedagogy = {
+                            "field_name": f_obj["name"],
+                            "interpreted": f_obj["interpreted"],
+                            **f_obj["pedagogy"],
+                        }
                     break
 
         return {
@@ -436,6 +482,7 @@ class AnalysisService:
             "vmaddr": f"0x{vm_val:x}" if vm_val is not None else None,
             "raw_hex": raw_hex_8,
             "breadcrumbs": breadcrumbs,
+            "field_pedagogy": matched_field_pedagogy,
             "primitives": {
                 "uint8": u8,
                 "int8": i8,
@@ -452,6 +499,7 @@ class AnalysisService:
                 "sleb128": {"value": sleb_val, "byte_length": sleb_len},
                 "cstring_preview": cstr_clean,
                 "arm64_insn": arm64_str,
+                "x86_insn": x86_str,
             },
         }
 

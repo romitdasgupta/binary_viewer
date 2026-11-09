@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MachOStudio — High-Density Mach-O Binary &amp; Firmware Inspector</title>
+  <title>MachOStudio — Multi-Format Binary Inspector (Mach-O, ELF32/64 &amp; Windows PE)</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -15,8 +15,8 @@
         <polyline points="17 8 12 3 7 8" />
         <line x1="12" y1="3" x2="12" y2="15" />
       </svg>
-      <div class="dropzone-title">Drop Mach-O Binary, Universal Fat Binary, Dylib, or Firmware Image</div>
-      <div class="dropzone-subtitle">Supports MH_EXECUTE, MH_DYLIB, MH_BUNDLE, MH_OBJECT, MH_PRELOAD, MH_KEXT_BUNDLE &amp; FAT_MAGIC</div>
+      <div class="dropzone-title">Drop Mach-O, Linux ELF32/64, or Windows PE32/PE32+ Binary</div>
+      <div class="dropzone-subtitle">Supports Universal Fat Mach-O, Firmware Preload, ELF32/ELF64 (ET_EXEC/ET_DYN/ET_REL), and Windows EXE/DLL/SYS</div>
     </div>
   </div>
 
@@ -64,8 +64,8 @@
     <!-- 1. TOP GLOBAL TOOLBAR (42px) -->
     <header class="top-toolbar">
       <div class="brand-cluster">
-        <div class="brand-logo" title="MachOStudio Reverse Engineering Suite">
-          <span class="brand-hex">0xFEEDFACF</span>
+        <div class="brand-logo" title="MachOStudio Multi-Format Binary &amp; Systems Architecture Suite">
+          <span id="brand-format-badge" class="brand-hex">0xFEEDFACF</span>
           <span class="brand-name">MachO<span class="brand-accent">Studio</span></span>
         </div>
 
@@ -75,17 +75,17 @@
         <div class="presets-group" id="presets-bar" aria-label="Built-in Sample Binaries">
           <span class="toolbar-label">Presets:</span>
           <!-- Populated dynamically from /api/presets with immediate fallback pills -->
-          <button class="preset-pill" data-preset-path="fixtures/synthetic_universal" title="Multi-arch test binary with custom segments, C++/ObjC symbols, chained fixups &amp; entitlements">
-            <span class="preset-dot dot-purple"></span>Synthetic Universal
+          <button class="preset-pill" data-preset-path="fixtures/synthetic_universal" title="Multi-arch Mach-O binary with custom segments, C++/ObjC symbols, chained fixups &amp; entitlements">
+            <span class="preset-dot dot-purple"></span>Mach-O Universal
           </button>
           <button class="preset-pill" data-preset-path="fixtures/synthetic_firmware.preload" title="Standalone ARM64 MH_PRELOAD firmware image with LC_UNIXTHREAD &amp; RWX segment">
             <span class="preset-dot dot-amber"></span>Firmware (MH_PRELOAD)
           </button>
-          <button class="preset-pill" data-preset-path="/bin/ls" title="macOS Universal system utility (arm64e PAC + x86_64)">
-            <span class="preset-dot dot-cyan"></span>/bin/ls
+          <button class="preset-pill" data-preset-path="fixtures/synthetic_elf64" title="Hardened 64-bit Linux ELF64 PIE with Full RELRO, CET (IBT/SHSTK) &amp; PLT/GOT">
+            <span class="preset-dot dot-cyan"></span>ELF64 Service
           </button>
-          <button class="preset-pill" data-preset-path="/usr/bin/true" title="Minimal macOS Universal Mach-O executable">
-            <span class="preset-dot dot-emerald"></span>/usr/bin/true
+          <button class="preset-pill" data-preset-path="fixtures/synthetic_pe64.exe" title="Windows 64-bit PE32+ with Rich Header, IAT Imports, Forwarded Exports, RSDS PDB &amp; Authenticode">
+            <span class="preset-dot dot-emerald"></span>PE32+ (Windows)
           </button>
         </div>
       </div>
@@ -135,6 +135,11 @@
             <option value="0">Loading…</option>
           </select>
         </div>
+
+        <!-- Guided Learning Tours & Rosetta Stone Quick Button -->
+        <button id="btn-open-learn" class="btn-toolbar btn-learn" title="Interactive OS Loader Lifecycle, Format Rosetta Stone &amp; Guided Learning Tours">
+          <span>🎓 Learn &amp; Tours</span>
+        </button>
 
         <!-- Global Search Trigger (Cmd+K) -->
         <button id="btn-open-cmdk" class="btn-cmdk" title="Global Omni-Search (Cmd+K or /)">
@@ -351,8 +356,9 @@
             <div class="dec-cell"><span class="dec-k">ULEB128</span><span class="dec-v" id="dec-uleb">—</span></div>
             <div class="dec-cell"><span class="dec-k">SLEB128</span><span class="dec-v" id="dec-sleb">—</span></div>
             <div class="dec-cell"><span class="dec-k">float32 / 64</span><span class="dec-v" id="dec-float">—</span></div>
-            <div class="dec-cell"><span class="dec-k">ARM64 Insn</span><span class="dec-v dec-insn" id="dec-insn">—</span></div>
+            <div class="dec-cell"><span class="dec-k">Insn Preview</span><span class="dec-v dec-insn" id="dec-insn">—</span></div>
           </div>
+          <div id="decoder-pedagogy-box" class="decoder-pedagogy-box hidden"></div>
         </div>
       </aside>
     </main>

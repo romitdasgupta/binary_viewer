@@ -41,13 +41,16 @@ def _print_cli_summary(
     sl = doc["slices"][slice_idx]
     ov = sl["overview"]
     sec = sl["security_posture"]
+    sem = sl.get("semantic_layers", {})
+    fmt_display = fi.get("format_display") or sl.get("format_display") or "Mach-O"
 
     print("=" * 78)
-    print(f"Mach-O Binary Analysis Report: {fi['path']}")
+    print(f"Mach-O / ELF / PE Binary Analysis Report [{fmt_display}]: {fi['path']}")
     print("=" * 78)
+    print(f"  Format      : {fmt_display} ({fi.get('format', 'MACHO')})")
     print(f"  File Size   : {fi['file_size']:,} bytes")
     print(f"  SHA-256     : {fi['sha256']}")
-    print(f"  Container   : {'Universal (Fat) Binary' if fi['is_fat'] else 'Single-Architecture Mach-O'}")
+    print(f"  Container   : {'Universal (Fat) Binary' if fi['is_fat'] else f'Single-Architecture {fmt_display}'}")
     if fi["is_fat"] and fi["fat_header"]:
         archs_str = ", ".join(
             f"#{s['slice_index']} {s['arch_name']} (off=0x{s['offset']:x}, sz={s['size']:,})"
@@ -59,13 +62,32 @@ def _print_cli_summary(
     print(f"  Active Slice: #{slice_idx} [{sl['arch_name']}] — {ov['arch_display']}")
     print(f"  File Type   : {ov['filetype_name']} ({ov['filetype_desc']})")
     print(f"  Header Flags: {', '.join(sl['header']['flags_decoded']) or '0x0'}")
-    print(f"  UUID        : {ov['uuid'] or 'None'}")
+    print(f"  UUID / ID   : {ov['uuid'] or 'None'}")
     print(f"  Platform    : {ov['platform']} (minOS: {ov['minos'] or 'N/A'}, SDK: {ov['sdk'] or 'N/A'})")
     print(f"  Entry Point : {ov['entry_point_vmaddr']} (abs offset 0x{ov['entry_point_abs_offset']:x}, via {ov['entry_point_type']})")
     print(
         f"  Counts      : {ov['segments_count']} segments, {ov['sections_count']} sections, "
         f"{ov['symbols_count']} symbols, {ov['strings_count']} strings, {ov['dylibs_count']} dylibs"
     )
+
+    if sem:
+        ent = sem.get("entropy_analysis", {})
+        caps = sem.get("capabilities", {})
+        prov = sem.get("provenance", {})
+        anom = sem.get("anomalies", {})
+        print("-" * 78)
+        print("  Semantic Intelligence & Provenance:")
+        print(
+            f"    Overall Entropy : {ent.get('overall_entropy', 0.0):.2f} bits/byte "
+            f"[{ent.get('overall_classification', 'N/A')}] — {ent.get('packing_assessment', '')}"
+        )
+        print(
+            f"    Provenance      : {prov.get('compiler_family', 'Unknown')} | "
+            f"Lang: {', '.join(prov.get('source_languages', []))} | Strip: {prov.get('strip_level', 'Unknown')}"
+        )
+        active_caps = [c["title"] for c in caps.get("categories", [])]
+        print(f"    Capabilities    : {', '.join(active_caps) if active_caps else 'Minimal / Standard Runtime Only'}")
+        print(f"    Anomalies       : {anom.get('total_count', 0)} structural findings")
 
     print("-" * 78)
     print("  Segments & Sections:")

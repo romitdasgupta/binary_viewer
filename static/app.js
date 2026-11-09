@@ -316,12 +316,23 @@
 
     const baseOff = slice.slice_base_offset || 0;
     state.cursorOffset = baseOff;
-    state.structSpan = { abs_offset: baseOff, size: slice.header?.region?.size || 32, label: 'mach_header' };
+    state.structSpan = { abs_offset: baseOff, size: slice.header?.region?.size || 32, label: 'binary_header' };
     state.fieldSpan = null;
     state.activeDisasmSection = '';
     state.activeDisasmVmaddr = '';
 
-    document.getElementById('status-arch').textContent = `Arch: ${slice.arch_name} (${slice.overview?.filetype_name || 'Mach-O'})`;
+    const fmtBadge = document.getElementById('brand-format-badge');
+    if (fmtBadge) {
+      if (slice.format === 'ELF') {
+        fmtBadge.textContent = slice.is_64 ? '0x7F454C46 • ELF64' : '0x7F454C46 • ELF32';
+      } else if (slice.format === 'PE') {
+        fmtBadge.textContent = slice.is_64 ? 'MZ/PE • PE32+' : 'MZ/PE • PE32';
+      } else {
+        fmtBadge.textContent = slice.header?.magic || '0xFEEDFACF';
+      }
+    }
+
+    document.getElementById('status-arch').textContent = `Arch: ${slice.arch_name} (${slice.format_display || slice.overview?.filetype_name || 'Mach-O'})`;
 
     buildStructureTree();
     renderStructureTree();
@@ -348,6 +359,10 @@
       return node;
     };
 
+    const fmt = slice.format || 'MACHO';
+    const isElf = fmt === 'ELF';
+    const isPe = fmt === 'PE';
+
     // 1. Binary Overview Dashboard
     state.treeRootNodes.push(
       reg({
@@ -355,9 +370,54 @@
         label: 'Binary Overview',
         icon: 'OV',
         iconClass: 'badge-cyan',
-        badge: slice.overview?.filetype_name || 'MACH-O',
+        badge: slice.format_display || slice.overview?.filetype_name || 'MACH-O',
         region: slice.header?.region || { abs_offset: slice.slice_base_offset || 0, size: 32 },
         type: 'overview',
+      })
+    );
+
+    // 1B. Semantic & Entropy Intelligence Layer
+    const sem = slice.semantic_layers || {};
+    const entVal = sem.entropy_analysis?.overall_entropy;
+    state.treeRootNodes.push(
+      reg({
+        id: 'semantic_intel',
+        label: 'Semantic & Entropy Intel',
+        icon: 'SEM',
+        iconClass: 'badge-emerald',
+        badge: entVal !== undefined ? `${entVal.toFixed(1)}b` : 'INTEL',
+        region: slice.header?.region || { abs_offset: slice.slice_base_offset || 0, size: 64 },
+        type: 'semantic_intel',
+        subtitle: `${sem.entropy_analysis?.overall_classification || 'Entropy'} • ${(sem.capabilities?.categories || []).length} Capabilities • ${sem.provenance?.compiler_family || 'Toolchain'}`,
+      })
+    );
+
+    // 1C. OS Loader Lifecycle Simulator (Pedagogy Layer)
+    const ped = slice.pedagogy || {};
+    state.treeRootNodes.push(
+      reg({
+        id: 'loader_lifecycle',
+        label: 'OS Loader Lifecycle',
+        icon: 'LDR',
+        iconClass: 'badge-amber',
+        badge: '6 STAGES',
+        region: slice.header?.region || { abs_offset: slice.slice_base_offset || 0, size: 64 },
+        type: 'loader_lifecycle',
+        subtitle: ped.loader_lifecycle?.loader_name || 'Kernel & Dynamic Linker Execution Walkthrough',
+      })
+    );
+
+    // 1D. Format Rosetta Stone & Guided Tours
+    state.treeRootNodes.push(
+      reg({
+        id: 'rosetta_stone',
+        label: 'Rosetta Stone & Tours',
+        icon: 'EDU',
+        iconClass: 'badge-purple',
+        badge: `${(ped.guided_tours || []).length} TOURS`,
+        region: slice.header?.region || { abs_offset: slice.slice_base_offset || 0, size: 64 },
+        type: 'rosetta_stone',
+        subtitle: 'Mach-O ⇄ ELF ⇄ Windows PE Cross-Format Matrix & Interactive Challenges',
       })
     );
 
@@ -378,11 +438,16 @@
       );
     }
 
-    // 3. Mach-O Header
+    // 3. Primary File Header (Mach-O Header / ELF Ehdr / PE DOS+NT Header)
     if (slice.header) {
+      const hdrLabel = isElf
+        ? (slice.header.is_64bit ? 'ELF64 Header (Ehdr)' : 'ELF32 Header (Ehdr)')
+        : isPe
+        ? (slice.header.is_64bit ? 'PE32+ NT & Optional Header' : 'PE32 NT & Optional Header')
+        : (slice.header.is_64bit ? 'Mach64 Header' : 'Mach32 Header');
       const hdrNode = reg({
         id: 'mach_header',
-        label: slice.header.is_64bit ? 'Mach64 Header' : 'Mach32 Header',
+        label: hdrLabel,
         icon: 'HDR',
         iconClass: 'badge-purple',
         sub: hex(slice.header.region?.abs_offset ?? slice.slice_base_offset),
@@ -395,13 +460,13 @@
       state.treeRootNodes.push(hdrNode);
     }
 
-    // 4. Load Commands (#0..#N)
+    // 4. Load Commands / Program Headers / PE Headers & Data Directories (#0..#N)
     const lcs = slice.load_commands || [];
     const lcChildren = lcs.map((lc) =>
       reg({
         id: `lc_${lc.index}`,
         label: `#${lc.index} ${lc.cmd_name}`,
-        icon: 'LC',
+        icon: isElf ? 'PH' : isPe ? 'DIR' : 'LC',
         iconClass: 'badge-purple',
         sub: lc.summary ? lc.summary.split(' ')[0] : hex(lc.region?.abs_offset),
         region: lc.region,
@@ -412,10 +477,16 @@
       })
     );
 
+    const lcGroupLabel = isElf
+      ? 'Program Headers & Notes'
+      : isPe
+      ? 'Headers & Data Directories'
+      : 'Load Commands';
+
     state.treeRootNodes.push(
       reg({
         id: 'load_commands',
-        label: 'Load Commands',
+        label: lcGroupLabel,
         icon: 'CMD',
         iconClass: 'badge-purple',
         badge: String(lcs.length),
@@ -500,17 +571,22 @@
       })
     );
 
-    // 7. Dyld Info & Chained Fixups
+    // 7. Dyld Info / ELF Dynamic Linking / PE Imports, Exports & BaseReloc
     const dyld = slice.dyld_info || {};
     const fixupCount =
       (dyld.chained_fixups?.fixups?.length || 0) +
       (dyld.exports?.length || 0) +
       (dyld.binds?.length || 0) +
       (dyld.rebases?.length || 0);
+    const dyldLabel = isElf
+      ? 'Dynamic Linking (PLT/GOT & RELA)'
+      : isPe
+      ? 'Imports (IAT), Exports & Relocs'
+      : 'Dyld & Chained Fixups';
     state.treeRootNodes.push(
       reg({
         id: 'dyld_info',
-        label: 'Dyld & Chained Fixups',
+        label: dyldLabel,
         icon: 'FIX',
         iconClass: 'badge-amber',
         badge: String(fixupCount),
@@ -519,7 +595,7 @@
       })
     );
 
-    // 8. Symbol Table (LC_SYMTAB)
+    // 8. Symbol Table (LC_SYMTAB / .dynsym+.symtab / PE Imports+Exports)
     const syms = slice.symbols || [];
     state.treeRootNodes.push(
       reg({
@@ -533,13 +609,13 @@
       })
     );
 
-    // 9. Dynamic Symbol Table (LC_DYSYMTAB)
+    // 9. Dynamic Symbol Table (LC_DYSYMTAB / PLT / IAT Thunks)
     const dysym = slice.dysymtab || {};
     const indCount = (dysym.indirect_symbols || []).length;
     state.treeRootNodes.push(
       reg({
         id: 'dysymtab',
-        label: 'Dynamic Symbols (Stubs)',
+        label: isElf ? 'PLT / GOT Jump Slots' : isPe ? 'IAT Thunk Table' : 'Dynamic Symbols (Stubs)',
         icon: 'DYS',
         iconClass: 'badge-purple',
         badge: String(indCount),
@@ -595,15 +671,20 @@
       );
     }
 
-    // 13. Code Signature & Entitlements
+    // 13. Code Signature & Entitlements / Authenticode / ELF Build-ID
     const cs = slice.code_signature_detail || {};
+    const csLabel = isPe
+      ? 'Authenticode (WIN_CERTIFICATE)'
+      : isElf
+      ? 'Code Signing & ELF Notes'
+      : 'Code Signature & Entitlements';
     state.treeRootNodes.push(
       reg({
         id: 'code_signature',
-        label: 'Code Signature & Entitlements',
+        label: csLabel,
         icon: 'SIG',
         iconClass: 'badge-pink',
-        badge: cs.present ? (cs.code_directory?.cdhash_verified ? 'VERIFIED' : 'SIGNED') : 'NONE',
+        badge: cs.present ? (cs.code_directory?.cdhash_verified ? 'VERIFIED' : 'SIGNED') : (isElf && slice.elf_metadata?.notes?.length ? `${slice.elf_metadata.notes.length} NOTES` : 'NONE'),
         region: cs.superblob_region || slice.header?.region,
         type: 'code_signature',
       })
@@ -923,6 +1004,15 @@
       case 'overview':
         renderOverviewInspector(bodyEl);
         break;
+      case 'semantic_intel':
+        renderSemanticIntelInspector(bodyEl);
+        break;
+      case 'loader_lifecycle':
+        renderLoaderLifecycleInspector(bodyEl);
+        break;
+      case 'rosetta_stone':
+        renderRosettaAndToursInspector(bodyEl);
+        break;
       case 'fields':
       case 'load_command':
       case 'segment':
@@ -1209,6 +1299,18 @@
                 jumpBtn = `<button class="jump-chip" data-disasm-vm="${escapeHtml(f.target_vmaddr)}">Jump → ${escapeHtml(f.target_vmaddr)}</button>`;
               }
 
+              const ped = f.pedagogy;
+              const pedHtml = ped
+                ? `
+                  <div class="pedagogy-inline-box">
+                    <div><strong>Why it matters:</strong> ${escapeHtml(ped.why_it_matters || '')}</div>
+                    <div><strong>Loader behavior:</strong> ${escapeHtml(ped.loader_behavior || '')}</div>
+                    <div><strong>What if modified:</strong> ${escapeHtml(ped.what_if_modified || '')}</div>
+                    <div><strong>Cross-format peer:</strong> <span style="color: var(--rx-fg);">${escapeHtml(ped.cross_format_peer || '')}</span></div>
+                  </div>
+                `
+                : '';
+
               return `
                 <tr
                   class="struct-row"
@@ -1228,6 +1330,7 @@
                     ${f.description ? `<span style="color: var(--text-secondary); margin-left: 6px;">— ${escapeHtml(f.description)}</span>` : ''}
                     ${jumpBtn}
                     ${bitFlagsHtml}
+                    ${pedHtml}
                   </td>
                 </tr>
               `;
@@ -1982,18 +2085,44 @@
   }
 
   // -------------------------------------------------------------------------
-  // View 9: Code Signature & Entitlements Inspector (`LC_CODE_SIGNATURE`)
+  // View 9: Code Signature / Authenticode / ELF Notes Inspector
   // -------------------------------------------------------------------------
   function renderCodeSignatureInspector(bodyEl) {
     const slice = getActiveSlice();
     const cs = slice?.code_signature_detail || {};
     if (!cs.present) {
+      const elfNotes = slice?.elf_metadata?.notes || [];
+      if (slice?.format === 'ELF' && elfNotes.length > 0) {
+        bodyEl.innerHTML = `
+          <div class="overview-container">
+            <div class="panel-card">
+              <div class="panel-card-header">ELF Notes, GNU Build-ID &amp; Hardware Property Flags (${elfNotes.length})</div>
+              <div class="struct-table-wrap">
+                <table class="struct-table">
+                  <thead><tr><th>File Offset</th><th>Namespace</th><th>Note Type</th><th>Decoded Description</th></tr></thead>
+                  <tbody>
+                    ${elfNotes.map(n => `
+                      <tr class="struct-row" data-abs-offset="${n.abs_offset}" data-field-size="${n.size}">
+                        <td class="col-offset">${hex(n.abs_offset, 6)}</td>
+                        <td class="col-name">${escapeHtml(n.name)}</td>
+                        <td class="col-val">${escapeHtml(n.type_name)}</td>
+                        <td class="col-desc">${escapeHtml(n.description)}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        `;
+        return;
+      }
       bodyEl.innerHTML = `
         <div class="overview-container">
           <div class="panel-card">
-            <div class="panel-card-header">No Embedded Code Signature (LC_CODE_SIGNATURE)</div>
+            <div class="panel-card-header">No Embedded Cryptographic Signature Present</div>
             <div style="padding: 16px; color: var(--text-secondary);">
-              This Mach-O slice does not contain an embedded <code>LC_CODE_SIGNATURE</code> SuperBlob (common in standalone <code>MH_PRELOAD</code> firmware images or unstripped object files).
+              This ${escapeHtml(slice?.format_display || 'binary')} slice does not contain an embedded cryptographic signature (<code>LC_CODE_SIGNATURE</code> or <code>WIN_CERTIFICATE</code> Authenticode).
             </div>
           </div>
         </div>
@@ -2224,6 +2353,323 @@
     `;
   }
 
+  // -------------------------------------------------------------------------
+  // View 11: Semantic & Entropy Intelligence Inspector
+  // -------------------------------------------------------------------------
+  function renderSemanticIntelInspector(bodyEl) {
+    const slice = getActiveSlice();
+    if (!slice) return;
+    const sem = slice.semantic_layers || {};
+    const ent = sem.entropy_analysis || {};
+    const caps = sem.capabilities || {};
+    const prov = sem.provenance || {};
+    const anom = sem.anomalies || {};
+    const dist = ent.byte_class_distribution || {};
+    const windows = ent.sliding_windows || [];
+    const secMetrics = ent.section_metrics || [];
+    const capCats = caps.categories || [];
+    const strIntel = caps.string_intelligence || {};
+    const findings = anom.findings || [];
+
+    const entColorClass = (h) => {
+      if (h < 1.0) return 'ent-sparse';
+      if (h < 4.5) return 'ent-structured';
+      if (h < 6.5) return 'ent-code';
+      if (h < 7.2) return 'ent-dense';
+      return 'ent-packed';
+    };
+
+    const sparkBarsHtml = windows
+      .map((w) => {
+        const pct = Math.max(6, Math.round((w.entropy / 8.0) * 100));
+        return `<div class="entropy-bar ${entColorClass(w.entropy)}" style="height: ${pct}%" data-jump-offset="${w.abs_offset}" data-jump-size="${w.size}" title="Offset ${hex(w.abs_offset, 6)} (${formatBytes(w.size)}): ${w.entropy.toFixed(2)} bits/byte [${w.classification}]"></div>`;
+      })
+      .join('');
+
+    const richHeaderHtml =
+      slice.format === 'PE' && slice.pe_metadata?.rich_header?.present
+        ? `
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <span>Microsoft PE Rich Header (XOR Key: ${escapeHtml(slice.pe_metadata.rich_header.xor_key)})</span>
+              <button class="jump-chip" data-jump-offset="${slice.pe_metadata.rich_header.abs_offset}" data-jump-size="${slice.pe_metadata.rich_header.size}">Focus Rich Header in Hex ↵</button>
+            </div>
+            <div class="struct-table-wrap">
+              <table class="struct-table">
+                <thead><tr><th>Product ID</th><th>Tool / Compiler Name</th><th>Build Number</th><th>Object Count</th></tr></thead>
+                <tbody>
+                  ${(slice.pe_metadata.rich_header.entries || []).map(r => `
+                    <tr class="struct-row" data-abs-offset="${slice.pe_metadata.rich_header.abs_offset}" data-field-size="${slice.pe_metadata.rich_header.size}">
+                      <td class="col-val">${hex(r.prod_id, 4)}</td>
+                      <td class="col-name">${escapeHtml(r.product_name)}</td>
+                      <td>${r.build_num}</td>
+                      <td>${r.use_count}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `
+        : '';
+
+    bodyEl.innerHTML = `
+      <div class="overview-container">
+        <!-- KPI Cards -->
+        <div class="kpi-cards-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">Overall Shannon Entropy</span>
+            <span class="kpi-value" style="color: ${ent.overall_entropy >= 7.2 ? 'var(--danger-fg)' : 'var(--rx-fg)'};">${(ent.overall_entropy ?? 0).toFixed(2)} / 8.00 bits</span>
+            <span class="kpi-sub">${escapeHtml(ent.overall_classification || 'Standard')} • Max Window: ${(ent.max_window_entropy ?? 0).toFixed(2)}b</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Compiler &amp; Toolchain</span>
+            <span class="kpi-value" style="color: var(--ro-fg);">${escapeHtml(prov.compiler_family || 'System Toolchain')}</span>
+            <span class="kpi-sub">Lang: ${escapeHtml((prov.source_languages || []).join(', '))}</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Behavioral Capabilities</span>
+            <span class="kpi-value" style="color: var(--rw-fg);">${capCats.length} Active Domains</span>
+            <span class="kpi-sub">${caps.total_matched_indicators || 0} API / Symbol / String Indicators</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Structural Anomalies</span>
+            <span class="kpi-value" style="color: ${anom.high_severity_count > 0 ? 'var(--danger-fg)' : 'var(--ro-fg)'};">${findings.length} Findings</span>
+            <span class="kpi-sub">Strip Level: ${escapeHtml(prov.strip_level || 'Standard')}</span>
+          </div>
+        </div>
+
+        <!-- Entropy Sparkline & Byte Class Distribution -->
+        <div class="panel-card">
+          <div class="panel-card-header">
+            <span>Shannon Entropy Heatmap (${windows.length} Sliding Windows — Click Any Bar to Jump Hex)</span>
+            <span style="color: var(--text-secondary); font-weight: 400;">${escapeHtml(ent.packing_assessment || '')}</span>
+          </div>
+          <div class="entropy-sparkline-wrap">
+            <div class="entropy-sparkline-bars">${sparkBarsHtml}</div>
+            <div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-secondary);">
+              <span>0x000000 (Start of Slice)</span>
+              <span>Legend: <strong style="color: #8b949e;">Sparse (&lt;1.0)</strong> • <strong style="color: var(--ro-fg);">Structured (1–4.5)</strong> • <strong style="color: var(--rx-fg);">Native Code (4.5–6.5)</strong> • <strong style="color: var(--rw-fg);">Dense (6.5–7.2)</strong> • <strong style="color: var(--danger-fg);">Packed/Crypto (&gt;7.2)</strong></span>
+              <span>${hex((slice.slice_base_offset || 0) + (slice.slice_size || 0), 6)} (End)</span>
+            </div>
+
+            <div style="margin-top: 6px;">
+              <div style="font-size: 10.5px; color: var(--text-secondary); margin-bottom: 4px;">
+                Byte Class Distribution — Null (0x00): <strong>${dist.null_pct ?? 0}%</strong> • Printable ASCII (0x20–0x7E): <strong>${dist.ascii_pct ?? 0}%</strong> • Control/Low (0x01–0x1F): <strong>${dist.control_pct ?? 0}%</strong> • High-Bit/Binary (0x80–0xFF): <strong>${dist.high_pct ?? 0}%</strong>
+              </div>
+              <div class="byte-class-stacked-bar">
+                <div style="width: ${dist.null_pct ?? 0}%; background: #30363d;" title="Null Bytes: ${dist.null_pct ?? 0}%"></div>
+                <div style="width: ${dist.ascii_pct ?? 0}%; background: var(--ro-fg);" title="Printable ASCII: ${dist.ascii_pct ?? 0}%"></div>
+                <div style="width: ${dist.control_pct ?? 0}%; background: var(--rx-fg);" title="Low/Control Bytes: ${dist.control_pct ?? 0}%"></div>
+                <div style="width: ${dist.high_pct ?? 0}%; background: var(--hdr-fg);" title="High-Bit Binary Bytes: ${dist.high_pct ?? 0}%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Behavioral Capabilities Grid -->
+        <div class="panel-card">
+          <div class="panel-card-header">Behavioral Capability &amp; Subsystem Taxonomy (${capCats.length} Detected)</div>
+          ${capCats.length === 0 ? '<div style="padding: 12px; color: var(--text-secondary);">No specialized subsystem imports/strings matched beyond standard C runtime initialization.</div>' : ''}
+          <div class="capability-grid">
+            ${capCats.map(cat => `
+              <div class="cap-card">
+                <div class="sec-check-top">
+                  <span class="sec-check-title">${escapeHtml(cat.title)}</span>
+                  <span class="sec-status-pill sec-${cat.risk === 'HIGH' ? 'WARN' : 'INFO'}">${escapeHtml(cat.risk)} (${cat.match_count})</span>
+                </div>
+                <div class="sec-check-detail">${escapeHtml(cat.description)}</div>
+                <div class="cap-evidence-list">
+                  ${(cat.evidence || []).map(ev => `
+                    <button class="jump-chip" data-jump-offset="${ev.abs_offset || 0}" data-jump-size="16" title="${escapeHtml(ev.kind)}: ${escapeHtml(ev.value)}">
+                      ${escapeHtml(ev.indicator)}
+                    </button>
+                  `).join('')}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <!-- Two Column: Section Entropy Table & Provenance / Anomalies -->
+        <div class="overview-two-col">
+          <div class="panel-card">
+            <div class="panel-card-header">Per-Section Entropy &amp; Byte Distribution (${secMetrics.length})</div>
+            <div class="struct-table-wrap">
+              <table class="struct-table">
+                <thead><tr><th>Section</th><th>Size</th><th>Entropy</th><th>Semantic Class</th><th>ASCII / Null</th></tr></thead>
+                <tbody>
+                  ${secMetrics.map(m => `
+                    <tr class="struct-row" data-abs-offset="${m.abs_offset}" data-field-size="${Math.min(m.size || 64, 256)}">
+                      <td class="col-name">${escapeHtml(m.name)}</td>
+                      <td>${formatBytes(m.size)}</td>
+                      <td class="col-val" style="color: ${m.entropy >= 7.2 ? 'var(--danger-fg)' : 'var(--rx-fg)'};">${m.entropy.toFixed(2)} b</td>
+                      <td>${escapeHtml(m.classification)}</td>
+                      <td>${m.byte_classes?.ascii_pct ?? 0}% / ${m.byte_classes?.null_pct ?? 0}%</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-card-header">Structural Anomaly Forensics &amp; Build Provenance</div>
+            <div class="kv-list">
+              <div class="kv-row"><span class="kv-key">Compiler / Linker</span><span class="kv-val">${escapeHtml(prov.compiler_family)} (${escapeHtml((prov.linker_info || []).join(', ') || 'Standard')})</span></div>
+              <div class="kv-row"><span class="kv-key">ABI &amp; Target</span><span class="kv-val">${escapeHtml(prov.abi || 'Standard')}</span></div>
+              <div class="kv-row"><span class="kv-key">Debug Artifact / PDB / UUID</span><span class="kv-val">${escapeHtml((prov.debug_artifacts || []).join(' | ') || 'None')}</span></div>
+              <div class="kv-row"><span class="kv-key">Extracted URLs / Paths</span><span class="kv-val">${(strIntel.urls?.length || 0)} URLs, ${(strIntel.file_paths?.length || 0)} Paths, ${(strIntel.registry_keys?.length || 0)} Registry Keys</span></div>
+              ${findings.map(f => `
+                <div class="kv-row" style="cursor: pointer;" data-jump-offset="${f.abs_offset}" data-jump-size="32">
+                  <span class="kv-key"><span class="sec-status-pill sec-${f.severity === 'WARN' ? 'WARN' : 'INFO'}">${escapeHtml(f.severity)}</span> ${escapeHtml(f.title)}</span>
+                  <span class="kv-val" style="font-family: var(--font-sans); color: var(--text-secondary);">${escapeHtml(f.detail)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+
+        ${richHeaderHtml}
+      </div>
+    `;
+  }
+
+  // -------------------------------------------------------------------------
+  // View 12: Interactive OS Loader & Execution Lifecycle Simulator
+  // -------------------------------------------------------------------------
+  function renderLoaderLifecycleInspector(bodyEl) {
+    const slice = getActiveSlice();
+    if (!slice) return;
+    const lc = slice.pedagogy?.loader_lifecycle || {};
+    const stages = lc.stages || [];
+
+    bodyEl.innerHTML = `
+      <div class="overview-container">
+        <div class="panel-card">
+          <div class="panel-card-header">
+            <span>Interactive 6-Stage OS Loader &amp; Execution Lifecycle — ${escapeHtml(lc.os_family || '')}</span>
+            <span style="color: var(--rx-fg); font-family: var(--font-mono);">${escapeHtml(lc.loader_name || '')}</span>
+          </div>
+          <div style="padding: 10px 12px; color: var(--text-secondary); font-size: 11.5px;">
+            Trace how the operating system kernel and user-space dynamic linker transform this on-disk <strong>${escapeHtml(slice.format_display || slice.format)}</strong> file into a live process in virtual memory. Click any stage's <strong>Highlight Bytes in Hex</strong> button to inspect the exact file structure read at that step.
+          </div>
+          <div class="lifecycle-stepper">
+            ${stages.map(st => `
+              <div class="lifecycle-stage-card">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="stage-num-badge">${st.stage}</span>
+                    <strong style="color: var(--text-bright); font-size: 12.5px;">${escapeHtml(st.title)}</strong>
+                  </div>
+                  <button class="jump-chip" data-jump-offset="${st.abs_offset || 0}" data-jump-size="${st.size || 32}">Highlight Bytes ↵</button>
+                </div>
+                <div style="font-family: var(--font-mono); font-size: 10.5px; color: var(--rx-fg);">${escapeHtml(st.actor || '')}</div>
+                <div style="font-size: 11.5px; color: var(--text-primary); line-height: 1.45;">${escapeHtml(st.summary || '')}</div>
+                <div style="padding: 6px 8px; background: var(--bg-elevated); border-radius: 4px; border: 1px solid var(--border-subtle); font-family: var(--font-mono); font-size: 10.5px;">
+                  <div style="color: var(--ro-fg);"><strong>Binary Evidence:</strong> ${escapeHtml(st.binary_state || '')}</div>
+                  <div style="color: var(--rw-fg); margin-top: 3px;"><strong>If Corrupted:</strong> ${escapeHtml(st.failure_mode || '')}</div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // -------------------------------------------------------------------------
+  // View 13: Cross-Format Rosetta Stone Matrix & Guided Learning Tours
+  // -------------------------------------------------------------------------
+  function renderRosettaAndToursInspector(bodyEl) {
+    const slice = getActiveSlice();
+    if (!slice) return;
+    const ped = slice.pedagogy || {};
+    const rows = ped.rosetta_stone || [];
+    const tours = ped.guided_tours || [];
+    const fmt = slice.format || 'MACHO';
+
+    bodyEl.innerHTML = `
+      <div class="overview-container">
+        <!-- Guided Learning Tours with Interactive Micro-Challenges -->
+        <div class="panel-card">
+          <div class="panel-card-header">
+            <span>🎓 Guided Reverse Engineering &amp; Format Learning Tours (${tours.length} Tracks)</span>
+            <span style="color: var(--hdr-fg);">Click any step to highlight live bytes &amp; test your understanding</span>
+          </div>
+          <div class="lifecycle-stepper">
+            ${tours.map((tour, tIdx) => `
+              <div class="tour-card">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <strong style="font-size: 12.5px; color: var(--text-bright);">${escapeHtml(tour.title)}</strong>
+                  <span class="inspector-badge badge-purple">${escapeHtml(tour.level)} • ${escapeHtml(tour.estimated_time)}</span>
+                </div>
+                <div style="font-size: 11.5px; color: var(--text-secondary);">${escapeHtml(tour.description)}</div>
+                ${(tour.steps || []).map((st, sIdx) => `
+                  <div style="padding: 8px; background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 4px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <strong style="color: var(--rx-fg);">Step ${st.step_number}: ${escapeHtml(st.title)}</strong>
+                      <button class="jump-chip" data-select-node="${escapeHtml(st.target_node_id || 'overview')}" data-jump-offset="${st.abs_offset || 0}" data-jump-size="${st.size || 32}">Inspect Step ↵</button>
+                    </div>
+                    <div style="font-size: 11px; color: var(--text-primary); margin-top: 4px;">${escapeHtml(st.narrative)}</div>
+                    ${st.challenge ? `
+                      <div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-default);">
+                        <div style="font-size: 11px; font-weight: 600; color: var(--rw-fg);">Challenge: ${escapeHtml(st.challenge.question)}</div>
+                        ${(st.challenge.options || []).map((opt, oIdx) => `
+                          <button
+                            class="quiz-option-btn"
+                            data-quiz-correct="${oIdx === st.challenge.correct_index ? '1' : '0'}"
+                            data-quiz-exp="${escapeHtml(st.challenge.explanation || '')}"
+                          >${escapeHtml(opt)}</button>
+                        `).join('')}
+                        <div class="quiz-feedback hidden" style="margin-top: 5px; font-size: 11px; padding: 4px 6px; border-radius: 3px;"></div>
+                      </div>
+                    ` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <!-- Cross-Format Rosetta Stone Matrix -->
+        <div class="panel-card">
+          <div class="panel-card-header">
+            <span>Cross-Format "Rosetta Stone" Equivalence Matrix (Mach-O ⇄ ELF ⇄ Windows PE)</span>
+            <span style="color: var(--ro-fg);">Active Binary Column Highlighted (${escapeHtml(fmt)})</span>
+          </div>
+          <div class="struct-table-wrap">
+            <table class="struct-table">
+              <thead>
+                <tr>
+                  <th>Systems Concept</th>
+                  <th style="${fmt === 'MACHO' ? 'color: var(--rx-fg);' : ''}">Apple Mach-O (macOS / iOS)</th>
+                  <th style="${fmt === 'ELF' ? 'color: var(--rx-fg);' : ''}">Linux / SVR4 ELF (ELF32/64)</th>
+                  <th style="${fmt === 'PE' ? 'color: var(--rx-fg);' : ''}">Windows PE (PE32 / PE32+)</th>
+                  <th>Architectural Insight &amp; Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map(r => `
+                  <tr class="struct-row" data-abs-offset="${r.active_offset || 0}" data-field-size="32">
+                    <td class="col-name">${escapeHtml(r.concept)}</td>
+                    <td style="${fmt === 'MACHO' ? 'background: rgba(56,139,253,0.08); color: var(--text-bright);' : ''}">${escapeHtml(r.macho)}</td>
+                    <td style="${fmt === 'ELF' ? 'background: rgba(56,139,253,0.08); color: var(--text-bright);' : ''}">${escapeHtml(r.elf)}</td>
+                    <td style="${fmt === 'PE' ? 'background: rgba(56,139,253,0.08); color: var(--text-bright);' : ''}">${escapeHtml(r.pe)}</td>
+                    <td class="col-desc">
+                      ${escapeHtml(r.pedagogical_note)}
+                      <button class="jump-chip" data-select-node="${escapeHtml(r.active_target_node || 'overview')}" data-jump-offset="${r.active_offset || 0}" data-jump-size="32">Locate in Binary →</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   // =========================================================================
   // Synchronized Virtualized Hex & ASCII Pane + Chunk Fetcher
   // =========================================================================
@@ -2446,7 +2892,23 @@
     document.getElementById('dec-sleb').textContent = p.sleb128 ? `${p.sleb128.value} (${p.sleb128.byte_length}B)` : '—';
     document.getElementById('dec-float').textContent =
       p.float32 !== undefined && p.float32 !== null ? `${Number(p.float32).toPrecision(4)}` : '—';
-    document.getElementById('dec-insn').textContent = p.arm64_insn || p.cstring_preview || '—';
+    const slice = getActiveSlice();
+    const isArm = slice && /arm/i.test(slice.arch_name || '');
+    const insnPreview = isArm
+      ? (p.arm64_insn && p.arm64_insn !== 'N/A' ? p.arm64_insn : p.x86_insn)
+      : (p.x86_insn && p.x86_insn !== 'N/A' ? p.x86_insn : p.arm64_insn);
+    document.getElementById('dec-insn').textContent = insnPreview || p.cstring_preview || '—';
+
+    const pedBox = document.getElementById('decoder-pedagogy-box');
+    if (pedBox) {
+      if (data.field_pedagogy) {
+        const fp = data.field_pedagogy;
+        pedBox.innerHTML = `<strong style="color: var(--hdr-fg);">${escapeHtml(fp.field_name)}:</strong> ${escapeHtml(fp.why_it_matters || '')} <span style="color: var(--rx-fg);">[Peer: ${escapeHtml(fp.cross_format_peer || '')}]</span>`;
+        pedBox.classList.remove('hidden');
+      } else {
+        pedBox.classList.add('hidden');
+      }
+    }
 
     const crumbsEl = document.getElementById('decoder-breadcrumbs');
     const crumbs = data.breadcrumbs || [];
@@ -2730,7 +3192,11 @@
     document.getElementById('btn-nav-back').addEventListener('click', () => navigateHistory(-1));
     document.getElementById('btn-nav-fwd').addEventListener('click', () => navigateHistory(1));
 
-    // 6. Hex Dock Split Toggle (Right Split vs Bottom Split)
+    // 6. Hex Dock Split Toggle (Right Split vs Bottom Split) & Learn Button
+    document.getElementById('btn-open-learn')?.addEventListener('click', () => {
+      selectTreeNode('rosetta_stone', { scrollHex: false });
+    });
+
     document.getElementById('btn-toggle-dock').addEventListener('click', () => {
       const main = document.getElementById('workspace-main');
       const label = document.getElementById('dock-label');
@@ -2855,8 +3321,26 @@
       selectTreeNode(id, { scrollHex: true });
     });
 
-    // 10. Center Inspector Delegated Clicks (Fields, Jump Chips, Slice Switches, Disassembly Links)
+    // 10. Center Inspector Delegated Clicks (Fields, Jump Chips, Slice Switches, Disassembly Links, Quiz Buttons)
     document.getElementById('center-inspector').addEventListener('click', (e) => {
+      const quizBtn = e.target.closest('.quiz-option-btn');
+      if (quizBtn) {
+        e.stopPropagation();
+        const isCorrect = quizBtn.dataset.quizCorrect === '1';
+        const exp = quizBtn.dataset.quizExp || '';
+        const parent = quizBtn.parentElement;
+        parent.querySelectorAll('.quiz-option-btn').forEach(b => b.classList.remove('correct', 'wrong'));
+        quizBtn.classList.add(isCorrect ? 'correct' : 'wrong');
+        const fb = parent.querySelector('.quiz-feedback');
+        if (fb) {
+          fb.classList.remove('hidden');
+          fb.style.background = isCorrect ? 'var(--ro-bg)' : 'var(--danger-bg)';
+          fb.style.color = isCorrect ? 'var(--ro-fg)' : 'var(--danger-fg)';
+          fb.textContent = (isCorrect ? '✓ Correct! ' : '✗ Try again: ') + exp;
+        }
+        return;
+      }
+
       // Switch slice button
       const sliceBtn = e.target.closest('[data-switch-slice]');
       if (sliceBtn) {

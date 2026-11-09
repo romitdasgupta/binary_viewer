@@ -32,6 +32,9 @@ This document provides a byte-level engineering reference for the **Mach-O (Mach
    - [4.3 $O(\log N)$ Bidirectional Interval Index for Hex ↔ Structure Synchronization](#43-olog-n-bidirectional-interval-index-for-hex--structure-synchronization)
    - [4.4 Virtual Address (`VMAddr`) ↔ File Offset (`fileoff`) ↔ `RVA` Translation](#44-virtual-address-vmaddr--file-offset-fileoff--rva-translation)
    - [4.5 Automated Binary Hardening & Security Posture Analyzer](#45-automated-binary-hardening--security-posture-analyzer)
+5. [Deep Dive into ELF32 & ELF64 Binary Internals (`backend/elf_parser.py`)](#5-deep-dive-into-elf32--elf64-binary-internals-backendelf_parserpy)
+6. [Deep Dive into Windows PE32 & PE32+ Internals (`backend/pe_parser.py`)](#6-deep-dive-into-windows-pe32--pe32-internals-backendpe_parserpy)
+7. [Semantic Intelligence & Interactive Systems Pedagogy (`backend/semantics.py` & `backend/pedagogy.py`)](#7-semantic-intelligence--interactive-systems-pedagogy-backendsemanticspy--backendpedagogypy)
 
 ---
 
@@ -765,4 +768,88 @@ Implemented in [`evaluate_security_posture`](../backend/security.py#L19-L336), M
 Implemented in [`disassemble_window`](../backend/disasm.py#L265-L469) and [`decode_arm64_insn`](../backend/disasm.py#L34-L236), MachOStudio provides a dual-backend disassembly engine:
 1. **Deterministic Pure-Python AArch64 (`ARM64` / `ARM64e`) Decoder:** Decodes PAC/BTI instructions (`paciasp`, `pacibsp`, `autiasp`, `autibsp`, `retaa`, `retab`, `braa`, `blraa`, `bti`), PC-relative page addressing (`adrp`, `adr`), branches (`b`, `bl`, `b.<cond>`, `cbz`, `cbnz`, `br`, `blr`, `ret`), register-pair stack frames (`stp`, `ldp` with pre/post/signed indexing), loads/stores (`ldr`, `str`, `ldrb`, `strb`, `ldrh`, `strh`), arithmetic/moves (`add`, `sub`, `cmp`, `mov`, `movz`, `movn`, `movk`), and exceptions (`svc`, `brk`, `udf`).
 2. **Automatic `ADRP` + `ADD` Page-Offset Tracker:** As [`disassemble_window`](../backend/disasm.py#L412-L449) walks an ARM64 instruction stream, it tracks register page bases loaded by `adrp Xd, <page_base>`. When a subsequent `add Xd, Xn, #<page_off>` completes the 64-bit pointer calculation ($\text{target\_vm} = \text{page\_base} + \text{page\_off}$), the engine resolves $\text{target\_vm}$ against `__TEXT,__cstring` literals, `LC_SYMTAB`, `LC_FUNCTION_STARTS`, and `LC_DYSYMTAB` indirect symbol stubs (`imp._printf`), annotating the instruction inline.
-3. **`llvm-objdump` x86_64 / i386 Integration:** For Intel slices in Universal binaries, [`disassemble_window`](../backend/disasm.py#L350-L408) invokes `/Library/Developer/CommandLineTools/usr/bin/llvm-objdump --disassemble` on the requested `[start_vmaddr, stop_vmaddr)` window and enriches `callq`/`jmp` targets with resolved symbol names.
+3. **`llvm-objdump` / Pure-Python x86_64 & i386 Integration:** For Intel slices in Universal binaries as well as ELF32/64 and Windows PE32/PE32+ binaries, [`disassemble_window`](../backend/disasm.py#L515-L685) pairs system `llvm-objdump` / `objdump` with a built-in zero-dependency **x86 / x86_64 instruction decoder** ([`decode_x86_64_insn`](../backend/disasm.py#L251-L512)) that decodes CET `endbr64`/`endbr32`, REX prefixes, stack frame setup (`push`, `pop`, `sub rsp`), RIP-relative `lea`/`mov`, direct & indirect `call`/`jmp`, and conditional jumps (`je`, `jne`, `jg`, `jl`), automatically cross-referencing RIP-relative and branch targets against symbols, imports, and strings.
+
+---
+
+## 5. Deep Dive into ELF32 & ELF64 Binary Internals (`backend/elf_parser.py`)
+
+Implemented in [`parse_elf_slice`](../backend/elf_parser.py#L628-L1658), MachOStudio parses **ELF32 (`ELFCLASS32 = 1`)** and **ELF64 (`ELFCLASS64 = 2`)** binaries across Little-Endian (`ELFDATA2LSB = 1`) and Big-Endian (`ELFDATA2MSB = 2`) architectures (`EM_X86_64`, `EM_386`, `EM_AARCH64`, `EM_ARM`, `EM_RISCV`, `EM_PPC64`, `EM_MIPS`).
+
+### 5.1 Dual-Table Architecture: Program Headers (`Elf_Phdr`) vs. Section Headers (`Elf_Shdr`)
+Unlike Mach-O (where sections are nested inside `LC_SEGMENT_64` load commands), ELF separates the **execution view** from the **linking view**:
+- **Program Header Table (`e_phoff`, `e_phnum * e_phentsize`):** Read by the OS kernel (`fs/binfmt_elf.c`) and `ld-linux.so` at runtime. Key segment types include:
+  - `PT_LOAD` (`1`): Maps `[p_offset, p_offset + p_filesz)` into `[p_vaddr, p_vaddr + p_memsz)` with `PF_R (4) | PF_W (2) | PF_X (1)`. Any excess `p_memsz - p_filesz` is demand-zeroed `.bss`.
+  - `PT_DYNAMIC` (`2`): Points to the `.dynamic` tag array (`DT_NEEDED`, `DT_RUNPATH`, `DT_RPATH`, `DT_INIT_ARRAY`, `DT_FLAGS`, `DT_FLAGS_1`, `DT_RELA`, `DT_JMPREL`).
+  - `PT_INTERP` (`3`): Null-terminated path to the runtime dynamic linker (e.g., `/lib64/ld-linux-x86-64.so.2`).
+  - `PT_NOTE` (`4`): Contains 4-byte aligned TLV notes (`namesz`, `descsz`, `type`, `name`, `desc`):
+    - `NT_GNU_BUILD_ID (3)`: 20-byte SHA-1 / 16-byte MD5 build fingerprint (mapped to `overview.uuid`).
+    - `NT_GNU_ABI_TAG (1)`: Minimum Linux kernel ABI version (e.g., `Linux 3.2.0`).
+    - `NT_GNU_PROPERTY_TYPE_0 (5)`: Hardware CFI flags (`GNU_PROPERTY_X86_FEATURE_1_AND = 0xC0000002` for **Intel CET `IBT` & `SHSTK`**, and `GNU_PROPERTY_AARCH64_FEATURE_1_AND = 0xC0000000` for **ARM64 `BTI` & `PAC`**).
+  - `PT_GNU_STACK` (`0x6474E551`): Controls stack page permissions (`PF_R | PF_W` = NX stack enforced; `PF_X` set = executable stack vulnerability).
+  - `PT_GNU_RELRO` (`0x6474E552`): Region (`[p_vaddr, p_vaddr + p_memsz)`) covering `.init_array`, `.dynamic`, and `.got` that `ld.so` locks `PROT_READ` via `mprotect()` after startup relocations finish.
+- **Section Header Table (`e_shoff`, `e_shnum * e_shentsize`):** Used by linkers and debuggers. MachOStudio resolves section names via `.shstrtab` (`e_shstrndx`), maps each `SHF_ALLOC` section into its enclosing `PT_LOAD` segment, and collects non-allocated metadata sections (`.symtab`, `.strtab`, `.comment`) into a virtual `__ELF_META` group.
+
+### 5.2 9-Point ELF Security Posture Scorecard (`evaluate_elf_security_posture`)
+Implemented in [`evaluate_elf_security_posture`](../backend/elf_parser.py#L373-L625):
+1. **PIE / ASLR (`pie`):** Verifies `e_type == ET_DYN (3)` with `PT_INTERP` or `DF_1_PIE (0x8)`.
+2. **RELRO & BIND_NOW (`relro`):** Distinguishes **Full RELRO** (`PT_GNU_RELRO` + `DT_BIND_NOW`/`DF_BIND_NOW`/`DF_1_NOW`), **Partial RELRO** (`PT_GNU_RELRO` only), and **No RELRO**.
+3. **Non-Executable Stack (`nx_stack`):** Checks `PT_GNU_STACK` for absence of `PF_X (0x1)`.
+4. **Stack Canary (`stack_canary`):** Scans `.dynsym`/`.symtab` for `__stack_chk_fail` / `__stack_chk_guard`.
+5. **Hardware Control-Flow Integrity (`cfi_cet_pac`):** Checks `.note.gnu.property` for Intel CET (`IBT`/`SHSTK`) or ARM64 (`BTI`/`PAC`).
+6. **$\text{W}\oplus\text{X}$ Memory Hygiene (`rwx`):** Audits all `PT_LOAD` segments for simultaneous `PF_W | PF_X` and checks `.dynamic` for `DT_TEXTREL`.
+7. **`_FORTIFY_SOURCE` (`fortify`):** Detects bounds-checked glibc `*_chk` imports (`__printf_chk`, `__memcpy_chk`).
+8. **Dynamic Search Path Hygiene (`rpath`):** Audits `DT_RPATH` and `DT_RUNPATH` for relative (`.`, `$ORIGIN` risks) or world-writable (`/tmp`) paths.
+9. **Build-ID & Symbol Stripping (`build_id_symbols`):** Checks `.note.gnu.build-id` presence and `.symtab` stripping state.
+
+---
+
+## 6. Deep Dive into Windows PE32 & PE32+ Internals (`backend/pe_parser.py`)
+
+Implemented in [`parse_pe_slice`](../backend/pe_parser.py#L500-L1508), MachOStudio parses 32-bit **PE32 (`0x010B`)** and 64-bit **PE32+ (`0x020B`)** executables (`.exe`), dynamic-link libraries (`.dll`), and kernel drivers (`.sys`).
+
+### 6.1 MS-DOS Header, XOR-Encrypted Rich Header, and NT Headers
+1. **`IMAGE_DOS_HEADER` (`0x00..0x3F`):** Starts with `e_magic = 0x5A4D ('MZ')` and stores the 32-bit file offset `e_lfanew` at `+0x3C` pointing to `IMAGE_NT_HEADERS`.
+2. **XOR-Decrypted Rich Header ([`parse_rich_header`](../backend/pe_parser.py#L172-L246)):**
+   Between the DOS stub and `e_lfanew`, MSVC linkers embed an undocumented build provenance block terminated by the ASCII marker `'Rich'` (`0x68636952`) followed by a 32-bit XOR key $K$:
+   - Searching backwards from `'Rich'`, the parser locates the start marker `'DanS'` (`0x536E6144` = $\text{dword} \oplus K$).
+   - Every 8-byte record between `'DanS'` and `'Rich'` consists of two 32-bit integers XORed with $K$:
+     $$\text{comp\_id} = \text{raw}_0 \oplus K, \qquad \text{use\_count} = \text{raw}_1 \oplus K$$
+   - The upper 16 bits of `comp_id` encode the MSVC internal tool/product ID (`prod_id = comp_id >> 16`, e.g., `Utc1900_C`, `Utc1900_CPP`, `Linker1400`), and the lower 16 bits encode the compiler build number (`build_num = comp_id & 0xFFFF`).
+3. **`IMAGE_NT_HEADERS` (`'PE\0\0'` + `IMAGE_FILE_HEADER` + `IMAGE_OPTIONAL_HEADER32/64`):**
+   Decodes `Machine` (`0x8664` AMD64, `0x014C` I386, `0xAA64` ARM64), `TimeDateStamp`, `Characteristics`, `AddressOfEntryPoint`, `ImageBase`, `SectionAlignment` (typically `0x1000`), `FileAlignment` (typically `0x200`), `DllCharacteristics`, and the 16 `IMAGE_DATA_DIRECTORY` entries.
+
+### 6.2 RVA-to-File-Offset Resolution, IAT/ILT, Forwarded Exports, PDB & Authenticode
+- **RVA $\rightarrow$ File Offset Formula:** Given an RVA $r$, MachOStudio finds the `IMAGE_SECTION_HEADER` $S$ where $S.\text{VirtualAddress} \le r < S.\text{VirtualAddress} + \max(S.\text{VirtualSize}, S.\text{SizeOfRawData})$ and computes:
+  $$\text{file\_offset} = S.\text{PointerToRawData} + (r - S.\text{VirtualAddress})$$
+- **Import Table (`IMAGE_DIRECTORY_ENTRY_IMPORT`):** Walks 20-byte `IMAGE_IMPORT_DESCRIPTOR` records, reading the Import Lookup Table (`OriginalFirstThunk` / `ILT`) or Import Address Table (`FirstThunk` / `IAT`). If the MSB (`1 << 63` on PE32+ or `1 << 31` on PE32) is set, the import is by ordinal (`Ordinal#<low16>`); otherwise the entry is an RVA to `IMAGE_IMPORT_BY_NAME` (`Hint` + ASCII function name).
+- **Export Directory (`IMAGE_DIRECTORY_ENTRY_EXPORT`) & Forwarders:** Resolves `AddressOfFunctions`, `AddressOfNames`, and `AddressOfNameOrdinals`. When a function RVA falls *inside* the Export Directory's own `[rva, rva + size)` bounds, PE defines it as a **Forwarded Export**—an ASCII string such as `"NTDLL.RtlAllocateHeap"` redirected by `ntdll.dll` at runtime.
+- **Debug Directory (`IMAGE_DEBUG_TYPE_CODEVIEW`):** Parses `RSDS` records (`'RSDS'` magic + 16-byte little-endian GUID + 32-bit `Age` + null-terminated `.pdb` path).
+- **Authenticode Digital Signatures (`IMAGE_DIRECTORY_ENTRY_SECURITY`):** Unlike the other 15 Data Directories (which store RVAs), `CERTIFICATE_TABLE` (Index 4) stores a **direct physical file offset** to a `WIN_CERTIFICATE` header (`dwLength`, `wRevision = 0x0200`, `wCertificateType = 0x0002` PKCS#7 `SignedData`), whose embedded X.509 certificates are extracted via [`parse_cms_certificates`](../backend/codesign.py#L234-L264).
+
+---
+
+## 7. Semantic Intelligence & Interactive Systems Pedagogy (`backend/semantics.py` & `backend/pedagogy.py`)
+
+Every parsed Mach-O, ELF, and PE slice is automatically enriched in [`_enrich_slice_semantics_and_pedagogy`](../backend/parser.py#L1713-L1735) with two higher-order layers:
+
+### 7.1 Layer 4A: Semantic Intelligence (`backend/semantics.py`)
+1. **Shannon Entropy & 4-Bucket Byte Distribution ([`build_entropy_analysis`](../backend/semantics.py#L110-L230)):**
+   Computes Shannon entropy $H(X) = -\sum_{i=0}^{255} P(x_i) \log_2 P(x_i) \in [0.0, 8.0]$ bits/byte alongside exact byte-class percentages (`null_pct` `0x00`, `ascii_pct` `0x20..0x7E`, `control_pct` `0x01..0x1F`, `high_pct` `0x80..0xFF`) across every section and a 96-window sliding file sparkline to distinguish sparse padding ($H < 1.0$), plaintext/strings ($H \approx 4.0\text{–}5.5$), native machine code ($H \approx 4.5\text{–}6.8$), and compressed/packed/encrypted payloads ($H \ge 7.15$).
+2. **8-Category Behavioral Capability Taxonomy ([`build_capabilities_and_strings`](../backend/semantics.py#L334-L470)):**
+   Cross-references imported APIs, defined symbols, entitlements, and strings against 8 behavioral domains (`process`, `memory_injection`, `filesystem`, `network`, `crypto`, `dynamic_loading`, `anti_analysis`, `ipc_system`) and extracts structured URL, file path, and Windows Registry key indicators.
+3. **Toolchain & ABI Provenance ([`build_provenance_profile`](../backend/semantics.py#L473-L535)):**
+   Synthesizes compiler/linker lineage (`LC_BUILD_VERSION`, ELF `.comment`, or PE Rich Header `@comp.id` entries), source language fingerprints (`C`, `C++`, `Objective-C`, `Swift`, `Rust`, `Go`, `ARM64 Firmware`), and debug symbol identifiers.
+4. **Structural Anomaly Forensics ([`build_structural_anomalies`](../backend/semantics.py#L538-L625)):**
+   Flags `rwx_memory` ($\text{W}\oplus\text{X}$ violations), `high_entropy_code` ($H \ge 6.85$ on executable sections), `packer_section_name` (`UPX`, `VMProtect`, `Themida`), `ep_outside_exec_segment`, and `pe_tls_callbacks` (pre-main `IMAGE_DIRECTORY_ENTRY_TLS` hooks).
+
+### 7.2 Layer 4B: Interactive Systems Pedagogy (`backend/pedagogy.py`)
+1. **6-Stage OS Loader & Execution Lifecycle Simulator ([`build_loader_lifecycle`](../backend/pedagogy.py#L183-L494)):**
+   Generates a 6-step interactive execution walkthrough parameterized with the active binary's real virtual addresses, offsets, and segments for **macOS XNU + `dyld4`**, **Linux `fs/binfmt_elf.c` + `ld-linux.so`**, or **Windows NT Kernel (`MmCreateSection`) + `ntdll.dll!LdrInitializeThunk`**.
+2. **10-Row Cross-Format "Rosetta Stone" Matrix ([`build_rosetta_stone`](../backend/pedagogy.py#L497-L621)):**
+   Maps 10 core systems concepts side-by-side across Mach-O, ELF, and Windows PE (Container Magic, Segments vs. Sections, Null-Page Guard, Entry Point, Dynamic Linker, Stubs/PLT/IAT, ASLR Relocations, `__DATA_CONST`/RELRO/Read-Only IAT, Static Constructors/TLS, and Code Signing/Build-ID/Authenticode) with 1-click jump targets into the currently loaded file.
+3. **Contextual Field Deep-Dives ([`FIELD_PEDAGOGY_CATALOG`](../backend/pedagogy.py#L12-L160)):**
+   Annotates struct fields (`magic`, `cputype`, `cpusubtype`, `filetype`, `ncmds`, `flags`, `vmaddr`, `vmsize`, `initprot`, `e_ident[EI_MAG]`, `e_type`, `e_entry`, `e_phoff`, `e_shoff`, `p_type`, `p_flags`, `e_lfanew`, `OptionalHeader.AddressOfEntryPoint`, `OptionalHeader.ImageBase`, `OptionalHeader.DllCharacteristics`) with 4-part educational callouts (*Why it matters*, *OS loader behavior*, *What breaks if modified*, and *Cross-format peer*).
+4. **Guided Learning Tours & Micro-Challenges ([`build_guided_tours`](../backend/pedagogy.py#L624-L799)):**
+   Provides 3 interactive multi-step tours (*File Offset vs. Virtual Memory Address*, *Dynamic Function Call Trampolines (Stubs/PLT/IAT)*, and *60-Second Binary Security & Hardening Audit*) with interactive multiple-choice challenges.
+

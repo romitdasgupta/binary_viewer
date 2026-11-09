@@ -96,7 +96,11 @@ from .constants import (
     format_source_version,
     format_vm_prot,
 )
+from .elf_parser import ELF_MAGIC, parse_elf_slice
+from .pe_parser import is_pe_bytes, parse_pe_slice
+from .pedagogy import build_pedagogy_bundle
 from .security import evaluate_security_posture
+from .semantics import build_semantic_layers
 
 
 # ============================================================================
@@ -1656,6 +1660,7 @@ def _parse_macho_slice(
             })
 
     overview_obj = {
+        "format": "Mach-O",
         "filetype_name": ft_name,
         "filetype_desc": ft_desc,
         "arch_display": arch_display,
@@ -1680,6 +1685,7 @@ def _parse_macho_slice(
 
     return {
         "slice_index": slice_index,
+        "format": "macho",
         "arch_name": arch_short,
         "slice_base_offset": slice_base,
         "slice_size": slice_size,
@@ -1704,17 +1710,78 @@ def _parse_macho_slice(
     }
 
 
+def _enrich_slice_semantics_and_pedagogy(
+    slice_obj: Dict[str, Any], full_data: bytes, file_size: int
+) -> Dict[str, Any]:
+    fmt_upper = str(slice_obj.get("format", "MACHO")).upper()
+    is_64 = bool(slice_obj.get("header", {}).get("is_64bit", True))
+    slice_obj["format"] = fmt_upper
+    slice_obj["is_64"] = is_64
+    if "format_display" not in slice_obj:
+        if fmt_upper == "ELF":
+            slice_obj["format_display"] = "ELF64" if is_64 else "ELF32"
+        elif fmt_upper == "PE":
+            slice_obj["format_display"] = "PE32+" if is_64 else "PE32"
+        else:
+            slice_obj["format_display"] = "Mach-O 64" if is_64 else "Mach-O 32"
+    s_base = slice_obj.get("slice_base_offset", 0)
+    s_size = slice_obj.get("slice_size", file_size)
+    raw_slice = full_data[s_base : min(file_size, s_base + s_size)]
+    slice_obj["semantic_layers"] = build_semantic_layers(slice_obj, raw_slice, file_size)
+    slice_obj["pedagogy"] = build_pedagogy_bundle(slice_obj)
+    return slice_obj
+
+
 # ============================================================================
-# Top-Level Universal (Fat) & Thin Mach-O Entrypoint
+# Top-Level Multi-Format Binary Entrypoint (Mach-O / Universal, ELF32/64, PE32/64)
 # ============================================================================
 def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     if len(data) < 28:
-        raise ValueError(f"File too small ({len(data)} bytes) to be a valid Mach-O binary.")
+        raise ValueError(f"File too small ({len(data)} bytes) to be a valid Mach-O, ELF, or PE binary.")
 
     file_size = len(data)
     sha256_hex = hashlib.sha256(data).hexdigest()
     md5_hex = hashlib.md5(data).hexdigest()
 
+    # 1. Check for ELF32 / ELF64 (\x7fELF)
+    if data[:4] == ELF_MAGIC:
+        elf_slice = parse_elf_slice(data, path=path)
+        _enrich_slice_semantics_and_pedagogy(elf_slice, data, file_size)
+        return {
+            "file_info": {
+                "path": path,
+                "filename": os.path.basename(path),
+                "file_size": file_size,
+                "sha256": sha256_hex,
+                "md5": md5_hex,
+                "format": "ELF",
+                "format_display": "ELF64" if elf_slice["header"]["is_64bit"] else "ELF32",
+                "is_fat": False,
+                "fat_header": None,
+            },
+            "slices": [elf_slice],
+        }
+
+    # 2. Check for Windows PE32 / PE32+ ('MZ' + e_lfanew -> 'PE\0\0')
+    if is_pe_bytes(data):
+        pe_slice = parse_pe_slice(data, path=path)
+        _enrich_slice_semantics_and_pedagogy(pe_slice, data, file_size)
+        return {
+            "file_info": {
+                "path": path,
+                "filename": os.path.basename(path),
+                "file_size": file_size,
+                "sha256": sha256_hex,
+                "md5": md5_hex,
+                "format": "PE",
+                "format_display": "PE32+" if pe_slice["header"]["is_64bit"] else "PE32",
+                "is_fat": False,
+                "fat_header": None,
+            },
+            "slices": [pe_slice],
+        }
+
+    # 3. Universal (Fat) & Thin Mach-O 32/64
     magic_be = struct.unpack_from(">I", data, 0)[0]
     magic_le = struct.unpack_from("<I", data, 0)[0]
 
@@ -1806,6 +1873,7 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 if s_offset + 28 <= file_size:
                     actual_sz = min(s_size, file_size - s_offset)
                     parsed_slice = _parse_macho_slice(data, i, s_offset, actual_sz)
+                    _enrich_slice_semantics_and_pedagogy(parsed_slice, data, file_size)
                     slices_list.append(parsed_slice)
 
             fat_hdr_total = 8 + nfat_arch * arch_entry_size
@@ -1823,9 +1891,10 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     if not is_fat:
         if magic_le not in (MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64):
             raise ValueError(
-                f"Unrecognized Mach-O magic 0x{magic_be:08x} in '{path}'. Expected Universal Fat or Mach-O 32/64 header."
+                f"Unrecognized Mach-O magic 0x{magic_be:08x} in '{path}'. Expected Mach-O (0xFEEDFACF), Universal Fat (0xCAFEBABE), ELF (0x7F454C46), or Windows PE ('MZ')."
             )
         single_slice = _parse_macho_slice(data, 0, 0, file_size)
+        _enrich_slice_semantics_and_pedagogy(single_slice, data, file_size)
         slices_list.append(single_slice)
 
     return {
@@ -1835,11 +1904,16 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             "file_size": file_size,
             "sha256": sha256_hex,
             "md5": md5_hex,
+            "format": "MACHO",
+            "format_display": "Universal Mach-O" if is_fat else ("Mach-O 64" if slices_list[0]["header"]["is_64bit"] else "Mach-O 32"),
             "is_fat": is_fat,
             "fat_header": fat_header_obj,
         },
         "slices": slices_list,
     }
+
+
+parse_binary_bytes = parse_macho_bytes
 
 
 def parse_macho_file(path: str) -> Tuple[Dict[str, Any], bytes]:
