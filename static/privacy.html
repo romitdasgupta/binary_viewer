@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Privacy — BinaryStudio</title>
+<meta name="description" content="What happens to a file you open in BinaryStudio in each mode, what the server logs, what your browser stores, and what changes if ads are enabled.">
+<link rel="canonical" href="privacy.html">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<meta property="og:site_name" content="BinaryStudio">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Privacy">
+<meta name="twitter:card" content="summary">
+<link rel="stylesheet" href="static/css/site.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the content</a>
+<header class="site-header"><div class="site-header-inner"><a class="site-brand" href="./">BinaryStudio</a><nav class="site-nav" aria-label="Sections"><a href="learn/">Learn</a><a href="learn/glossary/">Glossary</a><a href="learn/compare/">Comparison</a><a href="learn/fields/">Field reference</a></nav><a class="site-open" href="./">Open the tool</a></div></header>
+<div class="site-layout">
+<main id="main" class="site-main" tabindex="-1">
+<article class="prose">
+<header class="page-head">
+<h1>Privacy</h1>
+<p class="lede">What happens to a file you open, what is logged, and what your browser keeps. Last updated <mark class="fill">[DATE]</mark>.</p>
+</header>
+
+<p>This site is run by <mark class="fill">[OPERATOR NAME]</mark>. Questions about this page: <mark class="fill">[CONTACT EMAIL]</mark>.</p>
+
+<div class="facts">
+<p><strong>In short.</strong> BinaryStudio reads files; it never runs them. The status bar of the tool says which of three modes you are using. <em>In browser</em>: your file never leaves your device. <em>Hosted</em>: your file is sent to this server, kept in memory while you use it, then dropped. It is never written to disk and never logged. <em>Local</em>: the server runs on your own machine. BinaryStudio sets no cookies.</p>
+</div>
+
+<h2 id="files">What happens to a file you open</h2>
+
+<h3 id="in-browser">In browser (the static site)</h3>
+<p>The analysis engine is downloaded from this site and runs inside your browser tab, in a Web Worker. Your file is read by your browser and analysed there. It is not uploaded, not even in part, and this site has no server that could receive it. The status bar shows <em>In browser</em>.</p>
+<p>A service worker keeps a copy of the site's own files (the page, scripts and the engine) so the tool works offline. It never stores the files you open.</p>
+
+<h3 id="hosted">Hosted (a BinaryStudio server)</h3>
+<p>Your file is uploaded to this server over the connection you are using. The status bar shows <em>Hosted</em>. Then:</p>
+<ul>
+<li>The file and the analysis results are held in the server's memory. They are not written to disk.</li>
+<li>The file is addressed by a random identifier of 128 bits. That identifier is the only way to reach it, and the tool never puts it into a link or the address bar. Anyone who has the identifier can read the file until it is dropped, so do not share it.</li>
+<li>The file is dropped after it has gone unused for 30 minutes. It can be dropped earlier when the server needs the memory for other people's files, and all files are gone when the server restarts. The operator can change the 30 minutes; this server uses <mark class="fill">[30 MINUTES, OR THE VALUE OF BINARYSTUDIO_DOC_TTL]</mark>.</li>
+<li>Patched copies you make in the Labs are treated the same way.</li>
+<li>The file is analysed, never executed.</li>
+</ul>
+
+<h3 id="local">Local</h3>
+<p>When you run <code>python3 binary_viewer.py</code> yourself, the server runs on your own machine and files stay on it. The status bar shows <em>Local</em>.</p>
+
+<h2 id="logs">What the server logs (hosted mode)</h2>
+<p>For each request the server writes one line to its log. The line holds the time, your IP address (for IPv6, only the first 64 bits), the method, the path without its query string, the response status, the time taken, the number of bytes sent each way, and the kind of document asked for ("an upload", never its identifier).</p>
+<p>The log never contains the contents of your file, its name, or the analysis results. When something fails, the log records where in the code the failure happened, but not the error text, because that text can quote bytes of the file.</p>
+<p>The IP address is used to limit how many requests one client can make. Logs are kept for <mark class="fill">[LOG RETENTION PERIOD]</mark> by <mark class="fill">[HOSTING PROVIDER / WHO STORES LOGS]</mark>.</p>
+<p>The reverse proxy or CDN in front of this server may keep its own logs: <mark class="fill">[PROXY OR CDN, AND WHAT IT LOGS]</mark>. The proxy configurations shipped with BinaryStudio remove upload identifiers and file names from those logs.</p>
+
+<h2 id="storage">What your browser stores</h2>
+<p>BinaryStudio sets no cookies. It keeps a few settings in your browser's local storage, under keys that start with <code>binarystudio:</code>. They never leave your device:</p>
+<ul>
+<li>layout, theme, and the state of the tree and hex views;</li>
+<li>the last sample (or, in local mode, the last file path) and view, so the tool can reopen where you were. Uploaded files are never recorded;</li>
+<li>your progress through the Learn articles and tours;</li>
+<li>what you typed into the Labs (for example, bytes in the encoding lab, or the settings of the ELF builder);</li>
+<li>if this site asks before showing ads, your answer.</li>
+</ul>
+<p>To clear all of these, clear this site's data in your browser's settings.</p>
+
+<h2 id="pages">Learning pages</h2>
+<p>The pages under <a href="learn/">Learn</a> are plain documents. They load nothing from other sites, except an ad if ads are enabled (see below).</p>
+
+<h2 id="ads">Advertising</h2>
+<p>BinaryStudio can show ads, but it does not unless the operator turns them on. On this site ads are <mark class="fill">[OFF / ON: NAME THE PROVIDER]</mark>.</p>
+<p>The rules are the same whichever provider is used:</p>
+<ul>
+<li>Code from an advertiser or ad network never runs inside this site. An ad is either drawn by BinaryStudio's own code as plain text, an image and a link, or shown in an isolated frame. That frame cannot read this page, your files or your settings.</li>
+<li>Ads appear on the learning pages, beside or below the text. They appear in the tool itself only if the operator turns on a separate strip under the status bar. They are never placed between you and the data you are analysing.</li>
+<li>Every ad is labelled. Ad links are marked as sponsored.</li>
+<li>If your browser sends Do Not Track or Global Privacy Control, no ad network is contacted at all.</li>
+</ul>
+<p>What each provider means for you:</p>
+<ul>
+<li><strong>Sponsor units</strong> written by the operator. Your browser makes no request to anyone else, except to load an image the operator hosts elsewhere, if any.</li>
+<li><strong>EthicalAds.</strong> Your browser asks EthicalAds' server for one ad and loads its image. EthicalAds receives your IP address, your browser's user agent, and the address of the page without its fragment. It never receives anything about your files. EthicalAds describes what it does with this data in its privacy policy, at ethicalads.io/privacy-policy.</li>
+<li><strong>A framed ad from another network.</strong> The network's page runs in the isolated frame and may set cookies of its own. This site asks you first and loads nothing until you answer. Its privacy policy: <mark class="fill">[NETWORK AND LINK TO ITS POLICY]</mark>.</li>
+</ul>
+
+<h2 id="changes">Changes</h2>
+<p>If what BinaryStudio does with your data changes, this page changes with it, and the date at the top is updated.</p>
+</article>
+</main>
+</div>
+<footer class="site-footer"><div class="site-footer-inner"><p>BinaryStudio reads Mach-O, ELF and PE files. Nothing you open is ever executed.</p><nav aria-label="Site"><a href="about.html">About</a> <a href="privacy.html">Privacy</a> <a href="terms.html">Terms</a></nav></div></footer>
+</body>
+</html>

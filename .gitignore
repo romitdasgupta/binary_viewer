@@ -19,3 +19,8 @@ fixtures/*.slice
 
 # Local CLI state
 .antigravitycli/
+
+# Static (in-browser) build output and an optional in-repo Pyodide cache (tools/build_static.py).
+# Pyodide is downloaded at build time and verified; it is never committed.
+dist/
+.pyodide-cache/

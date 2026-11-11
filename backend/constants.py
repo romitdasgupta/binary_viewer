@@ -95,17 +95,33 @@ CPU_SUBTYPES: Dict[int, Dict[int, str]] = {
         14: "CPU_SUBTYPE_ARM_V6M",
         15: "CPU_SUBTYPE_ARM_V7M",
         16: "CPU_SUBTYPE_ARM_V7EM",
+        17: "CPU_SUBTYPE_ARM_V8M",
+        18: "CPU_SUBTYPE_ARM_V8M_BASE",
+        19: "CPU_SUBTYPE_ARM_V8_1M_MAIN",
     },
     CPU_TYPE_ARM64: {
         0: "CPU_SUBTYPE_ARM64_ALL",
         1: "CPU_SUBTYPE_ARM64_V8",
         2: "CPU_SUBTYPE_ARM64E",
+        3: "CPU_SUBTYPE_ARM64_X1",
+        12: "CPU_SUBTYPE_ARM64E_X1",
     },
     CPU_TYPE_ARM64_32: {
         0: "CPU_SUBTYPE_ARM64_32_ALL",
         1: "CPU_SUBTYPE_ARM64_32_V8",
     },
 }
+
+
+# mach/machine.h: CPU_SUBTYPE_HAS_ARM64E(subtype) is true for ARM64E (2) and ARM64E_X1 (12).
+ARM64E_SUBTYPES = (2, 12)
+CPU_SUBTYPE_PTRAUTH_ABI = 0x80000000            # "pointer authentication with versioned ABI"
+CPU_SUBTYPE_ARM64_PTR_AUTH_MASK = 0x0F000000    # the ABI version, bits 24..27
+
+
+def is_arm64e_subtype(cpusubtype: int) -> bool:
+    """True if an ARM64 cpusubtype names a pointer-authentication (arm64e) slice."""
+    return (cpusubtype & ~CPU_SUBTYPE_MASK) in ARM64E_SUBTYPES
 
 
 def decode_cpu_arch(cputype: int, cpusubtype: int) -> Tuple[str, str, str, str]:
@@ -120,11 +136,20 @@ def decode_cpu_arch(cputype: int, cpusubtype: int) -> Tuple[str, str, str, str]:
     base_sub_name = subtype_map.get(sub_masked, f"CPU_SUBTYPE_0x{sub_masked:x}")
 
     if cputype == CPU_TYPE_ARM64:
-        if sub_masked == 2:
-            arch_short = "arm64e"
-            pac_ver = f"PAC v0x{cap_bits:02x}" if cap_bits else "PAC"
-            sub_name = f"{base_sub_name} ({pac_ver})"
-            display = f"ARM64e (Pointer Authentication ABI v0x{cap_bits:02x})"
+        if sub_masked in ARM64E_SUBTYPES:
+            # The capability byte is not a version by itself: bit 31 says the slice uses the
+            # versioned pointer-authentication ABI and bits 24..27 hold that ABI's version
+            # (otool prints these as "USR00" / "KER00"; bit 30 marks a kernel ABI).
+            # lipo and file(1) call the two pointer-authentication slices "arm64e" and "arm64e.x1";
+            # a universal system binary carries both, so the names have to differ.
+            arch_short = "arm64e" if sub_masked == 2 else "arm64e.x1"
+            ptrauth_version = (cpusubtype & CPU_SUBTYPE_ARM64_PTR_AUTH_MASK) >> 24
+            if cpusubtype & CPU_SUBTYPE_PTRAUTH_ABI:
+                abi = f"ptrauth ABI version {ptrauth_version}" + (", kernel" if cpusubtype & 0x40000000 else "")
+            else:
+                abi = "unversioned ptrauth ABI"
+            sub_name = f"{base_sub_name} ({abi})"
+            display = f"ARM64e ({abi})" if sub_masked == 2 else f"ARM64e X1 ({abi})"
         elif sub_masked == 1:
             arch_short = "arm64v8"
             sub_name = base_sub_name
@@ -230,8 +255,9 @@ MH_DEAD_STRIPPABLE_DYLIB = 0x00400000
 MH_HAS_TLV_DESCRIPTORS = 0x00800000
 MH_NO_HEAP_EXECUTION = 0x01000000
 MH_APP_EXTENSION_SAFE = 0x02000000
-MH_NLIST_OUTOFSORT_WITH_DYLDINFO = 0x04000000
+MH_NLIST_OUTOFSYNC_WITH_DYLDINFO = 0x04000000
 MH_SIM_SUPPORT = 0x08000000
+MH_IMPLICIT_PAGEZERO = 0x10000000
 MH_DYLIB_IN_CACHE = 0x80000000
 
 MH_HEADER_FLAGS: List[Tuple[int, str, str]] = [
@@ -261,8 +287,9 @@ MH_HEADER_FLAGS: List[Tuple[int, str, str]] = [
     (0x00800000, "MH_HAS_TLV_DESCRIPTORS", "Contains Thread-Local Variable (TLV) descriptors"),
     (0x01000000, "MH_NO_HEAP_EXECUTION", "Heap memory is marked non-executable"),
     (0x02000000, "MH_APP_EXTENSION_SAFE", "Linked for use in an App Extension"),
-    (0x04000000, "MH_NLIST_OUTOFSORT_WITH_DYLDINFO", "External symbols in nlist not sorted with dyldinfo"),
+    (0x04000000, "MH_NLIST_OUTOFSYNC_WITH_DYLDINFO", "External symbols in nlist do not include all symbols in the dyld info"),
     (0x08000000, "MH_SIM_SUPPORT", "Allow simulator platform support"),
+    (0x10000000, "MH_IMPLICIT_PAGEZERO", "Main executable has no __PAGEZERO segment; the loader must still keep the low addresses unmapped"),
     (0x80000000, "MH_DYLIB_IN_CACHE", "Dylib is part of the dyld shared cache"),
 ]
 
@@ -729,4 +756,77 @@ DICE_KINDS: Dict[int, str] = {
     3: "DICE_KIND_JUMP_TABLE16",
     4: "DICE_KIND_JUMP_TABLE32",
     5: "DICE_KIND_ABS_JUMP_TABLE32",
+}
+
+
+# ============================================================================
+# Analysis Limits (denial-of-service caps for untrusted input)
+# ============================================================================
+# Every count, offset and size in a binary is attacker-controlled. The parsers
+# never use one directly as a loop bound or allocation size: they are clamped
+# to these caps (and to the bytes actually present). When a cap truncates what
+# is shown, the slice gets a `warnings` entry ({code, message, limit, total})
+# and `truncated: true`, so the view is never silently partial.
+#
+# The caps are sized so that real-world binaries up to the public upload limit
+# (tens of MB) are shown in full or near-full while a hostile file cannot push
+# a single parse past a few seconds or a few hundred MB of memory.
+ANALYSIS_LIMITS: Dict[str, int] = {
+    # Containers
+    "fat_slices": 32,                  # nfat_arch accepted (larger => not a fat binary)
+    # Mach-O structure
+    "load_commands": 2048,             # ncmds processed per slice
+    "segments": 512,                   # LC_SEGMENT(_64) / PT_LOAD mapped per slice
+    "sections_per_segment": 256,       # nsects processed per LC_SEGMENT(_64)
+    "sections_total": 4096,            # all sections per slice
+    "build_tools": 16,                 # LC_BUILD_VERSION ntools
+    "data_in_code": 128,               # LC_DATA_IN_CODE entries shown
+    # Symbols / linking (per slice)
+    "symbols": 20000,                  # nlist / Elf_Sym / PE import+export symbols
+    "symbol_name_bytes": 512,          # longest symbol name read
+    "indirect_symbols": 16384,
+    "imports": 8192,                   # chained-fixup / ELF / PE imports
+    "exports": 4096,                   # export trie / ELF / PE exports
+    "export_trie_nodes": 200000,       # nodes visited in an export trie
+    "export_name_chars": 4096,         # longest export name assembled from trie edges
+    "fixups_preview": 2048,            # relocation / fixup entries decoded
+    "fixup_chain_steps": 32,           # steps walked per chained-fixup page
+    "fixup_pages": 256,                # pages per chained-fixup segment
+    "fixup_segments": 32,
+    "function_starts": 5000,
+    # Strings
+    "strings": 4000,                   # strings extracted per slice
+    "string_section_bytes": 262144,    # bytes scanned per string section
+    "string_scan_bytes": 8388608,      # total bytes scanned for strings per slice
+    # ELF
+    "elf_section_headers": 4096,
+    "elf_program_headers": 512,
+    "elf_dynamic_entries": 1024,
+    "elf_notes": 256,
+    # PE
+    "pe_sections": 96,                 # Windows loader limit
+    "pe_import_descriptors": 1024,
+    "pe_thunks_per_dll": 4096,
+    "pe_base_reloc_blocks": 4096,
+    "pe_base_reloc_entries": 262144,   # entries scanned (not shown)
+    "pe_debug_entries": 32,
+    "pe_tls_callbacks": 16,
+    "pe_rich_scan_bytes": 16384,
+    "pe_pdata_entries": 5000,
+    # Code signature / certificates
+    "cs_blobs": 64,
+    "cs_blob_bytes": 1048576,          # largest sub-blob read for hashing / parsing
+    "cms_bytes": 4194304,              # largest CMS / PKCS#7 blob scanned
+    "entitlements_bytes": 262144,      # largest entitlements blob (XML plist or DER) decoded
+    "entitlements_file_bytes": 1048576,  # entitlement bytes decoded per file, all slices together
+    "cs_signature_bytes": 6291456,     # sub-blob bytes read (hashed / scanned) per signature
+    "cs_file_bytes": 8388608,          # ... and per file, all slices together
+    "cert_names": 64,                  # CN / O strings extracted per signature
+    "cert_name_candidates": 4096,      # OID occurrences examined while looking for them
+    "der_depth": 32,                   # DER entitlement nesting
+    "plist_depth": 32,                 # entitlement plist nesting kept in the document
+    "plist_nodes": 20000,              # entitlement plist values kept
+    # Semantic layers
+    "entropy_sample_total": 4194304,   # bytes sampled for per-section entropy (all sections)
+    "anomalies": 256,
 }

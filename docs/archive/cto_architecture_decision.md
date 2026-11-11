@@ -1,3 +1,5 @@
+> **Archived.** Design document from the first version of the project (2026). It does not describe the current code and its status lines ("locked", "authoritative", "proposed") no longer apply. See [docs/architecture.md](../architecture.md).
+
 # CTO Architecture Decision Record (ADR) & Integration Contract — BinaryStudio
 
 **Document ID:** `ADR-001-BINARYSTUDIO`  
@@ -10,7 +12,7 @@
 
 ## 1. Executive Summary & Final Architectural Decisions
 
-After reviewing [`systems_firmware_spec.md`](../../docs/specs/systems_firmware_spec.md) and [`ui_ux_spec.md`](../../docs/specs/ui_ux_spec.md) and auditing the target macOS host environment (`Python 3.9.6`, `Apple clang 21.0.0`, `/usr/bin/lipo`, `/usr/bin/codesign`, `/Library/Developer/CommandLineTools/usr/bin/llvm-objdump`, `swift-demangle`, `c++filt`), the following technical decisions are **final and locked**:
+After reviewing [`systems_firmware_spec.md`](./systems_firmware_spec.md) and [`ui_ux_spec.md`](./ui_ux_spec.md) and auditing the target macOS host environment (`Python 3.9.6`, `Apple clang 21.0.0`, `/usr/bin/lipo`, `/usr/bin/codesign`, `/Library/Developer/CommandLineTools/usr/bin/llvm-objdump`, `swift-demangle`, `c++filt`), the following technical decisions are **final and locked**:
 
 ### 1.1 Tech Stack Decision: Zero-Dependency Python 3 Stdlib Backend + Vanilla ES6 Desktop Web IDE + CLI
 - **Backend Server (`http.server.ThreadingHTTPServer`):**
@@ -766,7 +768,7 @@ Below is the exact top-level and per-slice JSON schema returned by `/api/parse` 
 ### 6.2 UI/UX & Frontend Architect (`ui_ux_expert`)
 - Implement `static/index.html`, `static/styles.css`, and `static/app.js`.
 - Consume `/api/presets`, `/api/parse`, `/api/upload`, `/api/hex`, `/api/decode`, `/api/translate`, `/api/disassemble`, and `/api/search`.
-- Implement all interactive features specified in [`ui_ux_spec.md`](../../docs/specs/ui_ux_spec.md):
+- Implement all interactive features specified in [`ui_ux_spec.md`](./ui_ux_spec.md):
   - Top bar with file picker, path input, one-click presets (`Synthetic Universal`, `Synthetic Firmware`, `/bin/ls`, `/usr/bin/true`), architecture slice switcher, and `Cmd+K` omni-search button.
   - Dual-Track Visual Memory Map Ribbon (File Offset Track + Virtual Memory Track, Compressed/Linear scale toggle, hover tooltips, live cursor playhead, click-to-jump).
   - Real-Time Address / Offset Converter Bar (`File Offset <-> VM Address <-> RVA` + resolved segment/section/symbol pill).

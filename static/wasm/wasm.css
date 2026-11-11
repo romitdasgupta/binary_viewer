@@ -1,0 +1,40 @@
+/* BinaryStudio static build: the quiet engine status in the status bar (static/wasm/transport.js). */
+.engine-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.engine-status[hidden] {
+  display: none;
+}
+.engine-status[data-state="busy"] {
+  color: var(--text-secondary);
+}
+.engine-status[data-state="error"] {
+  color: var(--danger-fg);
+}
+.engine-stop {
+  appearance: none;
+  background: none;
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.4;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.engine-stop[hidden] {
+  display: none;
+}
+.engine-stop:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+.engine-stop:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}

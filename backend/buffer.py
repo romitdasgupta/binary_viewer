@@ -2,8 +2,72 @@
 Layer 1: Bounds-Checked Binary Buffer Cursor & Automatic StructField Emitter.
 """
 
+import bisect
 import struct
 from typing import Any, Dict, List, Optional, Tuple
+
+
+class BinaryFormatError(ValueError):
+    """
+    Deliberate, user-facing rejection of an input that is not a parseable
+    Mach-O / ELF / PE file (bad magic, too small, no usable slices...).
+
+    Subclasses ValueError so existing `except ValueError` handlers keep working;
+    any *other* ValueError escaping the parser is a bug.
+    """
+
+
+# Reads larger than this are never zero-padded past the end of the data: callers
+# asking for big ranges get whatever bytes exist (padding a 4 GiB request read
+# from an attacker-controlled size field would allocate 4 GiB).
+_MAX_PADDED_READ = 4096
+
+
+def add_warning(
+    warnings: List[Dict[str, Any]],
+    code: str,
+    message: str,
+    limit: Optional[int] = None,
+    total: Optional[int] = None,
+) -> None:
+    """Append a structured, de-duplicated analysis warning (shown to the user)."""
+    for w in warnings:
+        if w.get("code") == code:
+            return
+    if len(warnings) >= 64:
+        return
+    entry: Dict[str, Any] = {"code": code, "message": message}
+    if limit is not None:
+        entry["limit"] = limit
+    if total is not None:
+        entry["total"] = total
+    warnings.append(entry)
+
+
+class SegmentLookup:
+    """
+    VM address -> slice file offset over segments with file backing.
+    Sorted + bisect instead of a linear scan per symbol, so a file with
+    thousands of segments and symbols stays O(n log n).
+    """
+
+    def __init__(self, segments: List[Dict[str, Any]]) -> None:
+        entries = sorted(
+            (seg["vmaddr_int"], seg["vmaddr_int"] + seg["filesize"], seg["fileoff"])
+            for seg in segments
+            if seg.get("filesize", 0) > 0
+        )
+        self._entries = entries
+        self._starts = [e[0] for e in entries]
+
+    def file_offset(self, vm: int) -> Optional[int]:
+        i = bisect.bisect_right(self._starts, vm) - 1
+        # Overlapping (malformed) segments: check a few predecessors.
+        for j in range(i, max(-1, i - 8), -1):
+            start, end, fileoff = self._entries[j]
+            if start <= vm < end:
+                return fileoff + (vm - start)
+        return None
 
 
 def format_raw_hex(data: bytes, max_bytes: int = 16) -> str:
@@ -82,12 +146,21 @@ class BinaryBuffer:
         return list(self._fields)
 
     def read_bytes(self, slice_offset: int, size: int) -> bytes:
+        """
+        Bounds-safe read. Small reads (struct-sized) that run past EOF are
+        zero-padded to `size` so fixed-format unpacking always works; large
+        reads are truncated to the bytes that exist instead of padded.
+        """
         abs_off = self.slice_base + slice_offset
-        if abs_off < 0 or size < 0 or abs_off + size > len(self.full_data):
+        if size <= 0:
+            return b""
+        if abs_off < 0 or abs_off + size > len(self.full_data):
             end = min(len(self.full_data), max(0, abs_off + size))
             start = min(len(self.full_data), max(0, abs_off))
-            chunk = self.full_data[start:end]
-            return chunk.ljust(size, b"\x00")
+            chunk = self.full_data[start:end] if end > start else b""
+            if size <= _MAX_PADDED_READ:
+                return chunk.ljust(size, b"\x00")
+            return chunk
         return self.full_data[abs_off : abs_off + size]
 
     def read_abs_bytes(self, abs_offset: int, size: int) -> bytes:
@@ -197,7 +270,11 @@ class BinaryBuffer:
         target_vmaddr: Optional[str] = None,
     ) -> Dict[str, Any]:
         abs_off = self.slice_base + slice_offset
-        raw_bytes = self.read_bytes(slice_offset, size)
+        if size < 0:
+            size = 0
+        # Only the preview bytes are needed (format_raw_hex shows 16); never
+        # materialise a field whose size came from the file.
+        raw_bytes = self.read_bytes(slice_offset, min(size, 17))
         raw_hex = format_raw_hex(raw_bytes)
         if value_str is None:
             if isinstance(raw_value, int):

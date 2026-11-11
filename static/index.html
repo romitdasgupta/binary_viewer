@@ -1,33 +1,51 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BinaryStudio — Multi-Format Binary Inspector &amp; Disassembler (Mach-O, ELF32/64 &amp; Windows PE)</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="Inspect Mach-O, ELF and PE binaries: headers, segments, symbols, disassembly and raw bytes, side by side." />
+  <title>BinaryStudio</title>
+  <link rel="stylesheet" href="static/styles.css" />
+  <!--
+    The core runs before first paint so the stored theme applies without a flash. It only defines
+    window.BinaryStudio here; it boots on DOMContentLoaded, after the feature scripts below.
+    No inline scripts or styles anywhere: the page is served with script-src 'self'.
+  -->
+  <script src="static/app.js"></script>
+  <!-- FEATURE STYLES: one <link rel="stylesheet" href="static/css/<feature>.css" /> per feature. -->
+  <link rel="stylesheet" href="static/css/labs-patch.css" />
+  <link rel="stylesheet" href="static/css/labs-encoding.css" />
+  <link rel="stylesheet" href="static/css/learn.css" />
+  <!-- FEATURE SCRIPTS: one <script defer src="static/js/<feature>.js"></script> per feature.
+       They talk to the core only through window.BinaryStudio (see the header of app.js). -->
+  <script defer src="static/js/labs-patch.js"></script>
+  <script defer src="static/js/labs-encoding.js"></script>
+  <script defer src="static/js/learn.js"></script>
 </head>
-<body>
-  <!-- Full-window Drag-and-Drop Overlay -->
-  <div id="dropzone-overlay" class="dropzone-overlay hidden">
+<body class="no-doc">
+  <a class="skip-link" href="#inspector-body">Skip to the inspector</a>
+
+  <!-- Full-window drop target (shown only while a file is dragged over the window) -->
+  <div id="dropzone-overlay" class="dropzone-overlay" hidden>
     <div class="dropzone-card">
-      <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-        <polyline points="17 8 12 3 7 8" />
-        <line x1="12" y1="3" x2="12" y2="15" />
-      </svg>
-      <div class="dropzone-title">Drop Mach-O, Linux ELF32/64, or Windows PE32/PE32+ Binary</div>
-      <div class="dropzone-subtitle">Supports Universal Fat Mach-O, Firmware Preload, ELF32/ELF64 (ET_EXEC/ET_DYN/ET_REL), and Windows EXE/DLL/SYS</div>
+      <div class="dropzone-title">Drop to open</div>
+      <div class="dropzone-subtitle" id="dropzone-sub">Mach-O, ELF or PE</div>
     </div>
   </div>
 
-  <!-- Floating Rich Tooltip for Memory Map Ribbon & Bitflags -->
-  <div id="global-tooltip" class="global-tooltip hidden" role="tooltip"></div>
+  <!-- Hover details for the memory map -->
+  <div id="global-tooltip" class="global-tooltip" role="tooltip" hidden></div>
 
-  <!-- Global Command Palette & Omni-Search Modal (Cmd+K / /) -->
-  <div id="cmdk-modal" class="cmdk-backdrop hidden" role="dialog" aria-modal="true" aria-label="Global Omni-Search">
+  <!-- Toasts and dialogs created through BS.ui -->
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <div id="modal-root"></div>
+
+  <!-- Search and command palette (Cmd/Ctrl+K) -->
+  <div id="cmdk-modal" class="cmdk-backdrop" role="dialog" aria-modal="true" aria-label="Search and commands" hidden>
     <div class="cmdk-dialog">
       <div class="cmdk-header">
-        <svg class="cmdk-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+        <svg class="cmdk-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <circle cx="8.5" cy="8.5" r="5.5" />
           <line x1="13" y1="13" x2="18" y2="18" />
         </svg>
@@ -35,295 +53,212 @@
           id="cmdk-input"
           type="text"
           class="cmdk-input"
-          placeholder="Search @symbols, &quot;strings, #load_commands, or hex bytes (e.g. cf fa ed fe / 0x100003f60)..."
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="cmdk-results"
+          aria-autocomplete="list"
+          aria-label="Search symbols, strings, structures and bytes, or type &gt; for commands"
+          placeholder="Search symbols, strings, structures, bytes — or > for commands"
           autocomplete="off"
+          autocapitalize="off"
           spellcheck="false"
         />
-        <span class="kbd-badge">ESC</span>
+        <kbd class="kbd-badge">Esc</kbd>
       </div>
-      <div class="cmdk-scopes" id="cmdk-scopes">
-        <button class="cmdk-scope-btn active" data-scope="all">All</button>
-        <button class="cmdk-scope-btn" data-scope="symbols"><span class="scope-prefix">@</span>Symbols</button>
-        <button class="cmdk-scope-btn" data-scope="strings"><span class="scope-prefix">"</span>Strings</button>
-        <button class="cmdk-scope-btn" data-scope="structures"><span class="scope-prefix">#</span>Structures &amp; Sections</button>
-        <button class="cmdk-scope-btn" data-scope="hex"><span class="scope-prefix">0x</span>Hex Bytes / Address</button>
+      <div class="cmdk-scopes" id="cmdk-scopes" role="group" aria-label="Search scope">
+        <button type="button" class="cmdk-scope-btn active" aria-pressed="true" data-scope="all">All</button>
+        <button type="button" class="cmdk-scope-btn" aria-pressed="false" data-scope="symbols"><span class="scope-prefix">@</span>Symbols</button>
+        <button type="button" class="cmdk-scope-btn" aria-pressed="false" data-scope="strings"><span class="scope-prefix">"</span>Strings</button>
+        <button type="button" class="cmdk-scope-btn" aria-pressed="false" data-scope="structures"><span class="scope-prefix">#</span>Structures</button>
+        <button type="button" class="cmdk-scope-btn" aria-pressed="false" data-scope="hex"><span class="scope-prefix">0x</span>Bytes</button>
+        <button type="button" class="cmdk-scope-btn" aria-pressed="false" data-scope="commands"><span class="scope-prefix">&gt;</span>Commands</button>
       </div>
-      <div id="cmdk-results" class="cmdk-results">
-        <div class="cmdk-empty">Type to search across symbols, strings, load commands, or raw hex bytes...</div>
-      </div>
+      <div id="cmdk-results" class="cmdk-results" role="listbox" aria-label="Results"></div>
       <div class="cmdk-footer">
-        <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-        <span><kbd>↵</kbd> Jump to Target</span>
-        <span>Prefix <kbd>@</kbd> Symbol <kbd>"</kbd> String <kbd>#</kbd> Struct <kbd>0x</kbd> Addr/Hex</span>
+        <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+        <span><kbd>Enter</kbd> open</span>
+        <span><kbd>&gt;</kbd> commands <kbd>@</kbd> symbols <kbd>"</kbd> strings <kbd>#</kbd> structures <kbd>0x</kbd> address or bytes</span>
       </div>
     </div>
   </div>
 
-  <!-- Main Full-Viewport Application Shell -->
-  <div class="app-shell">
-    <!-- 1. TOP GLOBAL TOOLBAR (42px) -->
+  <div class="app-shell" id="app-shell">
+    <!-- 1. TOOLBAR -->
     <header class="top-toolbar">
-      <div class="brand-cluster">
-        <div class="brand-logo" title="BinaryStudio Multi-Format Binary &amp; Systems Architecture Suite">
-          <span id="brand-format-badge" class="brand-hex">0xFEEDFACF</span>
-          <span class="brand-name">Binary<span class="brand-accent">Studio</span></span>
-        </div>
+      <div class="toolbar-left">
+        <button type="button" id="btn-toggle-sidebar" class="btn-icon-only only-narrow" aria-label="Show the structure tree" title="Structure tree">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><line x1="2.5" y1="4" x2="13.5" y2="4"/><line x1="2.5" y1="8" x2="13.5" y2="8"/><line x1="2.5" y1="12" x2="13.5" y2="12"/></svg>
+        </button>
+        <span class="brand-name">BinaryStudio</span>
 
-        <div class="toolbar-divider"></div>
-
-        <!-- Built-In One-Click Presets -->
-        <div class="presets-group" id="presets-bar" aria-label="Built-in Sample Binaries">
-          <span class="toolbar-label">Presets:</span>
-          <!-- Populated dynamically from /api/presets with immediate fallback pills -->
-          <button class="preset-pill" data-preset-path="fixtures/synthetic_universal" title="Multi-arch Mach-O binary with custom segments, C++/ObjC symbols, chained fixups &amp; entitlements">
-            <span class="preset-dot dot-purple"></span>Mach-O Universal
-          </button>
-          <button class="preset-pill" data-preset-path="fixtures/synthetic_firmware.preload" title="Standalone ARM64 MH_PRELOAD firmware image with LC_UNIXTHREAD &amp; RWX segment">
-            <span class="preset-dot dot-amber"></span>Firmware (MH_PRELOAD)
-          </button>
-          <button class="preset-pill" data-preset-path="fixtures/synthetic_elf64" title="Hardened 64-bit Linux ELF64 PIE with Full RELRO, CET (IBT/SHSTK) &amp; PLT/GOT">
-            <span class="preset-dot dot-cyan"></span>ELF64 Service
-          </button>
-          <button class="preset-pill" data-preset-path="fixtures/synthetic_pe64.exe" title="Windows 64-bit PE32+ with Rich Header, IAT Imports, Forwarded Exports, RSDS PDB &amp; Authenticode">
-            <span class="preset-dot dot-emerald"></span>PE32+ (Windows)
-          </button>
-        </div>
-      </div>
-
-      <!-- Center Path Input & File Upload -->
-      <div class="file-loader-cluster">
-        <form id="path-load-form" class="path-input-group" autocomplete="off">
-          <svg class="input-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <!-- The open document; click to open another (file, sample, or path in local mode) -->
+        <button type="button" id="btn-open" class="btn-toolbar doc-button" aria-haspopup="dialog" title="Open a binary (O)">
+          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
             <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h3.172a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.914 4H12.5A1.5 1.5 0 0 1 14 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9Z" />
           </svg>
-          <input
-            id="path-input"
-            type="text"
-            class="path-input"
-            placeholder="Binary path (e.g. /bin/ls, fixtures/synthetic_elf64, fixtures/synthetic_pe64.exe)…"
-            value="/bin/ls"
-            spellcheck="false"
-          />
-          <button type="submit" class="btn-toolbar btn-primary" title="Parse local Mach-O, ELF32/64, or Windows PE path on disk">Load Path</button>
-        </form>
-
-        <label class="btn-toolbar btn-upload" title="Browse or drag-and-drop any local Mach-O, ELF32/64, or Windows PE (.exe/.dll/.sys) file">
-          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M8 11V2m0 0L4.5 5.5M8 2l3.5 3.5M2.5 13.5h11" />
-          </svg>
-          <span>Open File…</span>
-          <input id="file-upload-input" type="file" class="sr-only" />
-        </label>
-      </div>
-
-      <!-- Right Controls: Architecture Slice Switcher, History, Search, Layout Toggle -->
-      <div class="toolbar-right-cluster">
-        <!-- Navigation Back / Forward -->
-        <div class="nav-history-group">
-          <button id="btn-nav-back" class="btn-icon-only" title="Navigate Back ( [ )" disabled>
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="10 3 5 8 10 13"/></svg>
-          </button>
-          <button id="btn-nav-fwd" class="btn-icon-only" title="Navigate Forward ( ] )" disabled>
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="6 3 11 8 6 13"/></svg>
-          </button>
-        </div>
-
-        <!-- Architecture Slice Switcher -->
-        <div class="slice-switcher-wrap" title="Active Architecture Slice (Fat/Universal Binary)">
-          <span class="slice-label">Slice:</span>
-          <select id="slice-select" class="slice-select" aria-label="Architecture Slice">
-            <option value="0">Loading…</option>
-          </select>
-        </div>
-
-        <!-- Guided Learning Tours & Rosetta Stone Quick Button -->
-        <button id="btn-open-learn" class="btn-toolbar btn-learn" title="Interactive OS Loader Lifecycle, Format Rosetta Stone &amp; Guided Learning Tours">
-          <span>🎓 Learn &amp; Tours</span>
+          <span id="btn-open-label" class="doc-name">Open…</span>
+          <span id="doc-format-tag" class="doc-tag"></span>
         </button>
 
-        <!-- Global Search Trigger (Cmd+K) -->
-        <button id="btn-open-cmdk" class="btn-cmdk" title="Global Omni-Search (Cmd+K or /)">
-          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <label id="slice-switcher" class="slice-switcher-wrap" title="Architecture slice of this universal binary" hidden>
+          <span class="slice-label">Slice</span>
+          <select id="slice-select" class="slice-select" aria-label="Architecture slice"></select>
+        </label>
+
+        <div class="nav-history-group" role="group" aria-label="History">
+          <button type="button" id="btn-nav-back" class="btn-icon-only" title="Back ([)" aria-label="Back" disabled>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><polyline points="10 3 5 8 10 13"/></svg>
+          </button>
+          <button type="button" id="btn-nav-fwd" class="btn-icon-only" title="Forward (])" aria-label="Forward" disabled>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><polyline points="6 3 11 8 6 13"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar-right">
+        <!-- EXTENSION MOUNT: BS.ui.addToolbarButton() appends here. The Learn-mode toggle lives here. -->
+        <div id="toolbar-ext" class="toolbar-ext"></div>
+
+        <button type="button" id="btn-open-cmdk" class="btn-cmdk" title="Search and commands">
+          <svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
             <circle cx="7" cy="7" r="4.5" />
             <line x1="10.5" y1="10.5" x2="14" y2="14" />
           </svg>
-          <span>Search…</span>
-          <kbd class="kbd-badge">⌘K</kbd>
+          <span class="hide-narrow">Search</span>
+          <kbd class="kbd-badge hide-narrow">/</kbd>
         </button>
 
-        <!-- Hex Dock Split Toggle (Right Split vs Bottom Split) -->
-        <button id="btn-toggle-dock" class="btn-toolbar" title="Toggle Hex Pane Dock Position (Right Split vs Bottom Split)">
-          <svg id="dock-icon" class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <button type="button" id="btn-toggle-dock" class="btn-icon-only hide-compact" title="Dock the hex pane at the bottom (D)" aria-label="Dock the hex pane at the bottom">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
             <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-            <line x1="9.5" y1="2.5" x2="9.5" y2="13.5" />
+            <line class="dock-line-right" x1="9.5" y1="2.5" x2="9.5" y2="13.5" />
+            <line class="dock-line-bottom" x1="1.5" y1="9" x2="14.5" y2="9" />
           </svg>
-          <span id="dock-label">Right Hex</span>
+        </button>
+        <button type="button" id="btn-theme" class="btn-icon-only" title="Switch theme (T)" aria-label="Switch theme">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <circle cx="8" cy="8" r="5.5" />
+            <path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        <button type="button" id="btn-help" class="btn-icon-only" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+          <span aria-hidden="true">?</span>
         </button>
       </div>
+      <div id="busy-bar" class="busy-bar" aria-hidden="true"></div>
     </header>
 
-    <!-- 2. DUAL VISUAL MEMORY MAP BAR (64px) -->
-    <section class="memory-map-bar" aria-label="Visual Memory Map Ribbon">
+    <!-- 2. MEMORY MAP: file layout above, virtual-memory layout below -->
+    <section class="memory-map-bar needs-doc" aria-label="Memory map">
       <div class="memmap-controls">
         <div class="memmap-title-row">
-          <span class="memmap-heading">MEMORY MAP</span>
-          <button id="btn-memmap-scale" class="scale-toggle-btn" title="Toggle between Sqrt Compressed Scale (shows __PAGEZERO without crushing segments) and Linear Scale">
-            Scale: <strong id="memmap-scale-label">Sqrt</strong>
+          <span class="memmap-heading">Memory map</span>
+          <button type="button" id="btn-memmap-scale" class="scale-toggle-btn" title="Block widths: square-root scale keeps small segments visible; linear is proportional (M)">
+            scale <strong id="memmap-scale-label">sqrt</strong>
           </button>
         </div>
-        <div class="memmap-legend">
-          <span class="legend-item"><i class="legend-swatch swatch-rx"></i>R-X</span>
-          <span class="legend-item"><i class="legend-swatch swatch-rw"></i>RW-</span>
-          <span class="legend-item"><i class="legend-swatch swatch-ro"></i>R--</span>
-          <span class="legend-item"><i class="legend-swatch swatch-hdr"></i>Hdr</span>
-          <span class="legend-item"><i class="legend-swatch swatch-cs"></i>Sign</span>
+        <div class="memmap-legend" aria-hidden="true">
+          <span class="legend-item"><i class="legend-swatch swatch-rx"></i>r-x</span>
+          <span class="legend-item"><i class="legend-swatch swatch-rw"></i>rw-</span>
+          <span class="legend-item"><i class="legend-swatch swatch-ro"></i>r--</span>
+          <span class="legend-item"><i class="legend-swatch swatch-hdr"></i>hdr</span>
+          <span class="legend-item"><i class="legend-swatch swatch-cs"></i>sig</span>
         </div>
       </div>
 
       <div class="memmap-tracks-container" id="memmap-tracks-container">
-        <!-- Track 1: Physical File Offset Layout -->
         <div class="memmap-track-row">
-          <div class="memmap-track-label" title="Physical File Layout on Disk (0x0 .. file_size)">FILE</div>
+          <div class="memmap-track-label" title="Layout of the file on disk">File</div>
           <div class="memmap-track" id="memmap-file-track"></div>
         </div>
-        <!-- Track 2: Virtual Memory Address Layout -->
         <div class="memmap-track-row">
-          <div class="memmap-track-label" title="Mapped Virtual Address Space (vmaddr .. vmaddr+vmsize)">VM</div>
+          <div class="memmap-track-label" title="Layout in virtual memory once loaded">VM</div>
           <div class="memmap-track" id="memmap-vm-track"></div>
         </div>
-        <!-- Synchronized Playhead Cursor Marker -->
-        <div id="memmap-playhead-file" class="memmap-playhead hidden"></div>
-        <div id="memmap-playhead-vm" class="memmap-playhead hidden"></div>
+        <div id="memmap-playhead-file" class="memmap-playhead" hidden></div>
+        <div id="memmap-playhead-vm" class="memmap-playhead" hidden></div>
       </div>
     </section>
 
-    <!-- 3. REAL-TIME ADDRESS / OFFSET CONVERTER & BREADCRUMB BAR (34px) -->
-    <section class="converter-bar" aria-label="Real-Time Address &amp; Offset Converter">
+    <!-- 3. ADDRESS / OFFSET TRANSLATOR -->
+    <section class="converter-bar needs-doc" aria-label="Translate between file offsets and addresses">
       <div class="converter-inputs-cluster">
-        <span class="converter-title" title="Bidirectional O(log N) Interval Translator (Hotkey: G)">
-          <svg class="converter-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M3 5h10M10 2l3 3-3 3M13 11H3m3-3-3 3 3 3" />
-          </svg>
-          TRANSLATE
-        </span>
+        <span class="converter-title" title="Type in any field; the others follow (G)">Translate</span>
 
         <label class="conv-field">
-          <span class="conv-tag">File Off</span>
-          <input id="conv-abs-input" type="text" class="conv-input" placeholder="0x000000" spellcheck="false" />
+          <span class="conv-tag">File offset</span>
+          <input id="conv-abs-input" type="text" class="conv-input" placeholder="0x0" spellcheck="false" autocomplete="off" autocapitalize="off" />
         </label>
-
-        <span class="conv-arrow">⇄</span>
-
         <label class="conv-field">
-          <span class="conv-tag">Slice Off</span>
-          <input id="conv-slice-input" type="text" class="conv-input" placeholder="0x000000" spellcheck="false" />
+          <span class="conv-tag">Slice offset</span>
+          <input id="conv-slice-input" type="text" class="conv-input" placeholder="0x0" spellcheck="false" autocomplete="off" autocapitalize="off" />
         </label>
-
-        <span class="conv-arrow">⇄</span>
-
         <label class="conv-field">
-          <span class="conv-tag">VM Addr</span>
-          <input id="conv-vm-input" type="text" class="conv-input conv-input-wide" placeholder="0x100000000" spellcheck="false" />
+          <span class="conv-tag">VM address</span>
+          <input id="conv-vm-input" type="text" class="conv-input conv-input-wide" placeholder="0x0" spellcheck="false" autocomplete="off" autocapitalize="off" />
         </label>
-
-        <span class="conv-arrow">⇄</span>
-
-        <label class="conv-field">
+        <label class="conv-field" title="Offset from the image base (the RVA, in PE terms)">
           <span class="conv-tag">RVA</span>
-          <input id="conv-rva-input" type="text" class="conv-input" placeholder="+0x0000" spellcheck="false" readonly />
+          <input id="conv-rva-input" type="text" class="conv-input" placeholder="—" spellcheck="false" readonly tabindex="-1" />
         </label>
 
-        <button id="btn-conv-jump-hex" class="btn-conv-action" title="Center Hex View on this Offset">Jump Hex</button>
-        <button id="btn-conv-disasm" class="btn-conv-action" title="Disassemble at this VM Address">Disassemble</button>
+        <button type="button" id="btn-conv-jump-hex" class="btn-conv-action" title="Move the hex cursor to this offset (Enter)">Show in hex</button>
+        <button type="button" id="btn-conv-disasm" class="btn-conv-action" title="Disassemble at this VM address">Disassemble</button>
       </div>
 
-      <!-- Resolved Context Pill (Segment, Section, Nearest Symbol) -->
-      <div class="converter-resolution" id="converter-resolution">
-        <span class="res-status-badge status-mapped" id="conv-status-badge">READY</span>
-        <span class="res-segment" id="conv-seg-pill">—</span>
-        <span class="res-symbol" id="conv-sym-pill">Type any File Offset or VM Address to resolve</span>
+      <div class="converter-resolution" id="converter-resolution" aria-live="off">
+        <span class="res-status-badge status-mapped" id="conv-status-badge"></span>
+        <span class="res-segment" id="conv-seg-pill"></span>
+        <button type="button" class="res-symbol copy-click" id="conv-sym-pill" hidden></button>
       </div>
     </section>
 
-    <!-- 4. MAIN 3-PANE WORKSPACE (Sidebar + Center Inspector + Docked Hex/ASCII Pane) -->
+    <!-- 4. WORKSPACE: tree | inspector | hex -->
     <main id="workspace-main" class="workspace-main dock-right">
-      <!-- 4A. LEFT SIDEBAR: HIERARCHICAL TREE NAVIGATOR -->
-      <aside id="left-sidebar" class="left-sidebar">
+      <aside id="left-sidebar" class="left-sidebar" aria-label="Structure">
         <div class="sidebar-search-bar">
-          <svg class="sidebar-filter-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+          <svg class="sidebar-filter-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
             <circle cx="6.8" cy="6.8" r="4.3" />
             <line x1="10" y1="10" x2="13.8" y2="13.8" />
           </svg>
-          <input
-            id="tree-filter-input"
-            type="text"
-            class="tree-filter-input"
-            placeholder="Filter tree nodes, load cmds, sections…"
-            spellcheck="false"
-          />
-          <button id="btn-tree-clear" class="tree-clear-btn hidden" title="Clear filter">×</button>
+          <input id="tree-filter-input" type="text" class="tree-filter-input" placeholder="Filter" aria-label="Filter the structure tree" spellcheck="false" autocomplete="off" />
+          <button type="button" id="btn-tree-clear" class="tree-clear-btn" aria-label="Clear filter" hidden>×</button>
         </div>
-
-        <div id="structure-tree" class="structure-tree" role="tree" aria-label="BinaryStudio Structure Tree">
-          <!-- Populated dynamically by app.js -->
-        </div>
+        <!-- Groups: Analysis (built-in), Learn, Labs, …, Help. BS.registerView() adds nodes. -->
+        <div id="structure-tree" class="structure-tree" role="tree" tabindex="0" aria-label="Structure tree"></div>
       </aside>
 
-      <!-- Draggable Resizer 1 (Sidebar <-> Center Inspector) -->
-      <div id="resizer-left" class="pane-resizer resizer-vertical" title="Drag to resize Structure Tree"></div>
+      <div id="resizer-left" class="pane-resizer resizer-vertical" role="separator" aria-orientation="vertical" aria-label="Resize the structure tree" tabindex="0"></div>
 
-      <!-- 4B. CENTER CONTEXT-SENSITIVE INSPECTOR PANE -->
-      <section id="center-inspector" class="center-inspector" aria-label="Structure &amp; Artifact Inspector">
-        <!-- Context Header Bar -->
+      <section id="center-inspector" class="center-inspector" aria-label="Inspector">
         <div class="inspector-header">
           <div class="inspector-title-group">
-            <span id="inspector-category-badge" class="inspector-badge badge-purple">OVERVIEW</span>
-            <h1 id="inspector-title" class="inspector-title">Binary Overview</h1>
+            <h1 id="inspector-title" class="inspector-title" tabindex="-1"></h1>
             <span id="inspector-subtitle" class="inspector-subtitle"></span>
           </div>
-
-          <div class="inspector-meta-pills" id="inspector-meta-pills">
-            <!-- Dynamic offset / VMAddr / size pills + Jump to Hex button -->
-          </div>
+          <div class="inspector-meta-pills" id="inspector-meta-pills"></div>
         </div>
-
-        <!-- Inspector Sub-View Container -->
-        <div id="inspector-body" class="inspector-body">
-          <!-- Dynamically renders Overview, Structure Field Table, Virtualized Symbols, Strings, Disassembly, Code Signature, Security Audit -->
-        </div>
+        <div id="inspector-body" class="inspector-body" tabindex="-1"></div>
       </section>
 
-      <!-- Draggable Resizer 2 (Center Inspector <-> Hex Pane) -->
-      <div id="resizer-hex" class="pane-resizer resizer-vertical" title="Drag to resize Hex &amp; ASCII Pane"></div>
+      <div id="resizer-hex" class="pane-resizer resizer-vertical needs-doc" role="separator" aria-orientation="vertical" aria-label="Resize the hex pane" tabindex="0"></div>
 
-      <!-- 4C. SYNCHRONIZED VIRTUALIZED HEX & ASCII PANE + LIVE BYTE DECODER -->
-      <aside id="hex-pane" class="hex-pane" aria-label="Synchronized Hex &amp; ASCII View">
-        <!-- Hex Pane Toolbar -->
+      <aside id="hex-pane" class="hex-pane needs-doc" aria-label="Hex view">
         <div class="hex-toolbar">
           <div class="hex-toolbar-left">
-            <span class="hex-pane-title">HEX / ASCII</span>
-            <button id="btn-hex-addr-mode" class="hex-mode-btn" title="Toggle Offset Column between File Offset and Virtual Memory Address (Hotkey: H)">
-              Col: <strong id="hex-addr-mode-label">File Offset</strong>
+            <span class="hex-pane-title">Hex</span>
+            <button type="button" id="btn-hex-addr-mode" class="hex-mode-btn" title="Show file offsets or VM addresses in the left column (H)">
+              <strong id="hex-addr-mode-label">file offset</strong>
             </button>
-            <span id="hex-selection-pill" class="hex-selection-pill">Cursor: 0x00000000</span>
+            <button type="button" id="hex-selection-pill" class="hex-selection-pill copy-click"></button>
           </div>
-
-          <div class="hex-toolbar-right">
-            <form id="hex-goto-form" class="hex-goto-form">
-              <input
-                id="hex-goto-input"
-                type="text"
-                class="hex-goto-input"
-                placeholder="Go to 0x…"
-                spellcheck="false"
-              />
-            </form>
-          </div>
+          <form id="hex-goto-form" class="hex-goto-form">
+            <input id="hex-goto-input" type="text" class="hex-goto-input" placeholder="Go to offset" aria-label="Go to file offset" spellcheck="false" autocomplete="off" autocapitalize="off" />
+          </form>
         </div>
 
-        <!-- Sticky Column Header for 16-Byte Grid -->
-        <div class="hex-grid-header">
-          <span class="hex-col-offset" id="hex-col-offset-title">OFFSET</span>
+        <div class="hex-grid-header" aria-hidden="true">
+          <span class="hex-col-offset" id="hex-col-offset-title">Offset</span>
           <span class="hex-col-bytes">
             <span>00</span><span>01</span><span>02</span><span>03</span><span>04</span><span>05</span><span>06</span><span>07</span>
             <span class="byte-gap">08</span><span>09</span><span>0A</span><span>0B</span><span>0C</span><span>0D</span><span>0E</span><span>0F</span>
@@ -331,58 +266,53 @@
           <span class="hex-col-ascii">ASCII</span>
         </div>
 
-        <!-- Virtualized Scroll Viewport -->
-        <div id="hex-viewport" class="hex-viewport" tabindex="0">
+        <div id="hex-viewport" class="hex-viewport" tabindex="0" role="group" aria-label="Hex bytes. Arrow keys move the cursor; Shift extends the selection.">
           <div id="hex-phantom" class="hex-phantom"></div>
           <div id="hex-rows-container" class="hex-rows-container"></div>
         </div>
 
-        <!-- Live Byte Inspector / Data Decoder Footer Card -->
         <div class="byte-decoder-card" id="byte-decoder-card">
           <div class="decoder-header">
-            <div class="decoder-breadcrumbs" id="decoder-breadcrumbs">
-              <span class="crumb-empty">Click any byte or structure field to inspect primitives &amp; ownership</span>
-            </div>
-            <button id="btn-decoder-endian" class="endian-toggle-btn" title="Toggle Little-Endian / Big-Endian Data Decoding">
-              Endian: <strong id="decoder-endian-label">Little</strong>
+            <div class="decoder-breadcrumbs" id="decoder-breadcrumbs" aria-label="Structures containing the cursor"></div>
+            <button type="button" id="btn-decoder-endian" class="endian-toggle-btn" title="Byte order used to decode the values below (E)">
+              <strong id="decoder-endian-label">little</strong>-endian
             </button>
           </div>
-
           <div class="decoder-grid" id="decoder-grid">
-            <div class="dec-cell"><span class="dec-k">uint8 / int8</span><span class="dec-v" id="dec-u8">—</span></div>
-            <div class="dec-cell"><span class="dec-k">uint16 / int16</span><span class="dec-v" id="dec-u16">—</span></div>
-            <div class="dec-cell"><span class="dec-k">uint32 / hex32</span><span class="dec-v" id="dec-u32">—</span></div>
-            <div class="dec-cell"><span class="dec-k">uint64</span><span class="dec-v" id="dec-u64">—</span></div>
-            <div class="dec-cell"><span class="dec-k">ULEB128</span><span class="dec-v" id="dec-uleb">—</span></div>
-            <div class="dec-cell"><span class="dec-k">SLEB128</span><span class="dec-v" id="dec-sleb">—</span></div>
-            <div class="dec-cell"><span class="dec-k">float32 / 64</span><span class="dec-v" id="dec-float">—</span></div>
-            <div class="dec-cell"><span class="dec-k">Insn Preview</span><span class="dec-v dec-insn" id="dec-insn">—</span></div>
+            <div class="dec-cell"><span class="dec-k">u8 / i8</span><button type="button" class="dec-v copy-click" id="dec-u8">—</button></div>
+            <div class="dec-cell"><span class="dec-k">u16 / i16</span><button type="button" class="dec-v copy-click" id="dec-u16">—</button></div>
+            <div class="dec-cell"><span class="dec-k">u32</span><button type="button" class="dec-v copy-click" id="dec-u32">—</button></div>
+            <div class="dec-cell"><span class="dec-k">u64</span><button type="button" class="dec-v copy-click" id="dec-u64">—</button></div>
+            <div class="dec-cell"><span class="dec-k">ULEB128</span><button type="button" class="dec-v copy-click" id="dec-uleb">—</button></div>
+            <div class="dec-cell"><span class="dec-k">SLEB128</span><button type="button" class="dec-v copy-click" id="dec-sleb">—</button></div>
+            <div class="dec-cell"><span class="dec-k">f32 / f64</span><button type="button" class="dec-v copy-click" id="dec-float">—</button></div>
+            <div class="dec-cell"><span class="dec-k">as code</span><button type="button" class="dec-v dec-insn copy-click" id="dec-insn">—</button></div>
           </div>
-          <div id="decoder-pedagogy-box" class="decoder-pedagogy-box hidden"></div>
+          <div id="decoder-pedagogy-box" class="decoder-pedagogy-box learn-only" hidden></div>
         </div>
       </aside>
     </main>
 
-    <!-- 5. BOTTOM STATUS BAR (24px) -->
+    <!-- 5. STATUS BAR -->
     <footer class="status-bar">
       <div class="status-left">
-        <span class="status-indicator" id="status-dot"></span>
-        <span id="status-text">Initializing BinaryStudio…</span>
-        <span class="status-sep">|</span>
-        <span id="status-file" class="status-mono">No file loaded</span>
-        <span class="status-sep">|</span>
-        <span id="status-hash" class="status-mono" title="SHA-256 Digest">SHA-256: —</span>
+        <span class="status-indicator" id="status-dot" aria-hidden="true"></span>
+        <span id="status-text" role="status">Starting…</span>
+        <span id="status-file" class="status-mono status-item">No file open</span>
+        <button type="button" id="status-hash" class="status-mono status-item status-button copy-click" hidden></button>
       </div>
       <div class="status-right">
-        <span id="status-arch" class="status-mono">Arch: —</span>
-        <span class="status-sep">|</span>
-        <span id="status-span" class="status-mono">Selected: None</span>
-        <span class="status-sep">|</span>
-        <span class="status-shortcuts"><kbd>⌘K</kbd> Search <kbd>G</kbd> Translate <kbd>H</kbd> Offset/VM <kbd>[</kbd><kbd>]</kbd> History</span>
+        <span id="status-span" class="status-mono status-item hide-compact"></span>
+        <span id="status-arch" class="status-mono status-item hide-compact"></span>
+        <span id="status-links" class="status-links"></span>
+        <!-- Where files are processed in this mode; click for the full sentence. -->
+        <button type="button" id="status-mode" class="status-item status-button" hidden></button>
       </div>
     </footer>
-  </div>
 
-  <script src="/static/app.js"></script>
+    <!-- OPTIONAL SLOT (BS.ui.slot('footer')): below the status bar, outside the work area.
+         display:none until shown; a fixed height is reserved before any content is placed. -->
+    <aside id="ext-slot-footer" class="ext-slot" data-slot="footer" aria-label="Sponsored" hidden></aside>
+  </div>
 </body>
 </html>

@@ -1,0 +1,96 @@
+# Caddy 2 reverse proxy for BinaryStudio in public mode.
+#
+# Caddy obtains and renews the TLS certificate for the domain by itself.
+# Start the app with:
+#   python3 binary_viewer.py --public --trust-proxy --allowed-host <your domain>
+# (deploy/docker-compose.yml does this through environment variables.)
+#
+# What the app needs from the proxy, and gets from Caddy's defaults:
+#   * the original Host header, unchanged. The app answers only to the names in
+#     --allowed-host and compares each request's Origin with its Host.
+#   * X-Forwarded-For whose LAST entry is the address Caddy saw. Caddy discards
+#     a client-supplied X-Forwarded-For unless `trusted_proxies` is configured,
+#     so do not configure that unless another proxy you run sits in front.
+#   * X-Forwarded-Proto (Caddy sets it): the app refuses a request whose Origin
+#     scheme differs from the scheme the browser used.
+#   * no path normalisation tricks: requests are passed through as received.
+#
+# Who enforces what. Nothing below relies on Caddy for a limit: Caddy has no
+# per-client connection or request cap of its own, and whether it stops reading
+# from a client while the app is slow is not something this setup depends on.
+#
+#   the app (backend/server.py, backend/api.py; all on by default with --public)
+#     - requests in progress per client address (the forwarded one), connections in total
+#     - request rate per client, stricter for uploads and patches, and by response size
+#     - upload size; memory for uploads in flight, in total and per client; a
+#       first-byte deadline and a minimum rate for request bodies
+#     - response bytes in flight, in total and per client; readers that stall are cut off
+#     - analysis time and memory (worker processes, killed on overrun), concurrency
+#     - Host allowlist, cross-site refusal, strict header parsing, security headers
+#   Caddy (this file)
+#     - TLS and certificates, HTTP/2 and HTTP/3 towards browsers
+#     - coarse timeouts and a request-body ceiling (a second line of defence only)
+#     - keeping document ids out of its own access log (see the log block)
+
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 2m
+			write 5m
+			idle 2m
+		}
+	}
+}
+
+{$BINARYSTUDIO_DOMAIN:binarystudio.example.com} {
+	encode zstd gzip
+
+	# A little above the app's own upload limit (32 MiB by default), so the app's
+	# JSON error is what a user sees for a file that is slightly too large.
+	request_body {
+		max_size 33MiB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	reverse_proxy {$BINARYSTUDIO_UPSTREAM:127.0.0.1:8421} {
+		health_uri /healthz
+		health_interval 15s
+		health_timeout 3s
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 90s
+		}
+	}
+
+	# Uploaded files are addressed by an unguessable id; whoever holds the id can
+	# read the file until it expires, so ids are kept out of this log. The web UI
+	# sends them in request headers (X-BS-Doc, and X-BS-Doc-A / X-BS-Doc-B for a
+	# comparison), which Caddy logs by default: those are deleted. The query forms
+	# that older clients and hand-written URLs use (doc=, a=, b=, and the
+	# local-mode path=) are redacted. Header names are written the way Go
+	# canonicalises them.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace doc REDACTED
+					replace a REDACTED
+					replace b REDACTED
+					replace path REDACTED
+				}
+				request>headers>X-Bs-Doc delete
+				request>headers>X-Bs-Doc-A delete
+				request>headers>X-Bs-Doc-B delete
+				request>headers>X-Filename delete
+				request>headers>Referer delete
+			}
+		}
+	}
+}

@@ -862,6 +862,188 @@ def _build_synthetic_elf32(fixtures_dir: str) -> str:
     return out_path
 
 
+# ============================================================================
+# Synthetic Authenticode signer for the PE fixture
+# ============================================================================
+# The PE fixture carries a real, structurally complete Authenticode signature so that
+# the "tamper with a signed file" experiment starts from a state in which the embedded
+# digest MATCHES the file. It is signed with the throw-away RSA key below.
+#
+# THIS KEY IS NOT A SECRET AND NOT A TRUST ANCHOR. It exists only so that the fixture
+# can be rebuilt byte-for-byte anywhere (including inside the browser); the certificate
+# names say that it is synthetic, nothing chains to a real authority, and nothing in
+# BinaryStudio trusts a signature because of who made it.
+_FIXTURE_RSA_E = 65537
+_FIXTURE_RSA_N = int(
+    "c38b111f3750746b350343880054890f66e0879b14432cd7d601301f0e91b611daf90708b3b16c69a112db6ea42b67a0"
+    "5d65ff234bc9fee6a4be8414c447eb58807ad0ba747c1a462e1367ac494b7fd02ff6e13b2d596a8003a4e676f41682cc"
+    "35e8e8dcdcbb6390d59ea9ff2ca4ac58bdb65155bdb8dc6d32f55954a73d914e4eaa9d6ac077196668f2c70b0b69af04"
+    "48446520fe82087ca7a198e525c956d9882b5ef5f01e31229c5f473744708c2ec7052b153ac84288dda28280c4fe0b78"
+    "8a491174d9bd7111a917119c241dbbccd9339089c4aa79a8056d5089e96d9260c106460a3ab23d213d19a5743a23d1ee"
+    "35f3d68b3e783fc2fed0ef90b6a53429",
+    16,
+)
+_FIXTURE_RSA_D = int(
+    "60ac0ffaeecdc7c078a4f46df83bd2c6da85868514af612c1390e2c977da71b8c218fb7141e52543d36e0f2dd3dbe18f"
+    "569d66557cd290425690199c6aad639c8d682a6903cd96efbb37bcb96043031d59992420ad7ad73c1291239f0b6d559c"
+    "bfca35d57b0ae95e613ddfad57d4d19fcdaaa4eb4eb065c956b81541d4ac8b78de04e4997656588b4cfb138c58a618cb"
+    "ef90b82e792ba22ecf77114920ffc31f56e313c2b87a910dee2f7b756d311120ba886b0ef855f7010ecac9d1080dc56b"
+    "5699049379ac92d81e128b8147b399eb9e22e69885f771bbe6702bc1a0bf118381ce46fd210d0238b987bd8d7d462b0d"
+    "8aaa4072cb7bdb2ac25c65e6fc3a8f5",
+    16,
+)
+
+_OID_SHA256 = "2.16.840.1.101.3.4.2.1"
+_OID_RSA = "1.2.840.113549.1.1.1"
+_OID_SHA256_RSA = "1.2.840.113549.1.1.11"
+_OID_SIGNED_DATA = "1.2.840.113549.1.7.2"
+_OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"
+_OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"
+_OID_SPC_INDIRECT_DATA = "1.3.6.1.4.1.311.2.1.4"
+_OID_SPC_PE_IMAGE_DATA = "1.3.6.1.4.1.311.2.1.15"
+_OID_ORG = "2.5.4.10"
+_OID_CN = "2.5.4.3"
+_OID_BASIC_CONSTRAINTS = "2.5.29.19"
+_OID_EXT_KEY_USAGE = "2.5.29.37"
+_OID_CODE_SIGNING = "1.3.6.1.5.5.7.3.3"
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    n = len(body)
+    if n < 0x80:
+        return bytes([tag, n]) + body
+    size = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(size)]) + size + body
+
+
+def _der_seq(*parts: bytes) -> bytes:
+    return _der(0x30, b"".join(parts))
+
+
+def _der_int(value: int) -> bytes:
+    body = value.to_bytes(value.bit_length() // 8 + 1, "big") if value else b"\x00"
+    return _der(0x02, body)
+
+
+def _der_oid(dotted: str) -> bytes:
+    arcs = [int(a) for a in dotted.split(".")]
+    body = bytearray([arcs[0] * 40 + arcs[1]])
+    for arc in arcs[2:]:
+        chunk = [arc & 0x7F]
+        arc >>= 7
+        while arc:
+            chunk.append(0x80 | (arc & 0x7F))
+            arc >>= 7
+        body.extend(reversed(chunk))
+    return _der(0x06, bytes(body))
+
+
+def _der_alg(oid: str) -> bytes:
+    return _der_seq(_der_oid(oid), b"\x05\x00")
+
+
+def _der_name(org: str, common_name: str) -> bytes:
+    return _der_seq(
+        _der(0x31, _der_seq(_der_oid(_OID_ORG), _der(0x0C, org.encode("utf-8")))),
+        _der(0x31, _der_seq(_der_oid(_OID_CN), _der(0x0C, common_name.encode("utf-8")))),
+    )
+
+
+def _fixture_rsa_sign(message: bytes) -> bytes:
+    """RSASSA-PKCS1-v1_5 with SHA-256, using the throw-away fixture key."""
+    import hashlib
+
+    k = (_FIXTURE_RSA_N.bit_length() + 7) // 8
+    digest_info = _der_seq(_der_alg(_OID_SHA256), _der(0x04, hashlib.sha256(message).digest()))
+    padded = b"\x00\x01" + b"\xff" * (k - len(digest_info) - 3) + b"\x00" + digest_info
+    return pow(int.from_bytes(padded, "big"), _FIXTURE_RSA_D, _FIXTURE_RSA_N).to_bytes(k, "big")
+
+
+def _fixture_certificate(serial: int, issuer: bytes, subject: bytes, is_ca: bool) -> bytes:
+    public_key = _der_seq(_der_int(_FIXTURE_RSA_N), _der_int(_FIXTURE_RSA_E))
+    spki = _der_seq(_der_alg(_OID_RSA), _der(0x03, b"\x00" + public_key))
+    validity = _der_seq(_der(0x17, b"240101000000Z"), _der(0x17, b"340101000000Z"))
+    if is_ca:
+        extensions = [_der_seq(_der_oid(_OID_BASIC_CONSTRAINTS), b"\x01\x01\xff", _der(0x04, _der_seq(b"\x01\x01\xff")))]
+    else:
+        extensions = [_der_seq(_der_oid(_OID_EXT_KEY_USAGE), _der(0x04, _der_seq(_der_oid(_OID_CODE_SIGNING))))]
+    tbs = _der_seq(
+        _der(0xA0, _der_int(2)),                 # version: v3
+        _der_int(serial),
+        _der_alg(_OID_SHA256_RSA),
+        issuer,
+        validity,
+        subject,
+        spki,
+        _der(0xA3, _der_seq(*extensions)),
+    )
+    return _der_seq(tbs, _der_alg(_OID_SHA256_RSA), _der(0x03, b"\x00" + _fixture_rsa_sign(tbs)))
+
+
+def synthetic_authenticode_pkcs7(image_digest: bytes) -> bytes:
+    """A PKCS#7 SignedData in the Authenticode profile whose SpcIndirectDataContent
+    holds `image_digest` (the SHA-256 Authenticode hash of the image), signed with the
+    throw-away fixture key through a two-certificate synthetic chain."""
+    import hashlib
+
+    org = "BinaryStudio synthetic test fixture (not a real signer)"
+    root_name = _der_name(org, "BinaryStudio Root Code Signing CA")
+    leaf_name = _der_name(org, "BinaryStudio Synthetic Corp")
+    root_cert = _fixture_certificate(1, root_name, root_name, True)
+    leaf_cert = _fixture_certificate(2, root_name, leaf_name, False)
+
+    # SpcPeImageData: flags (empty BIT STRING) and the customary "<<<Obsolete>>>" file link.
+    obsolete = "<<<Obsolete>>>".encode("utf-16-be")
+    pe_image_data = _der_seq(_der(0x03, b"\x00"), _der(0xA0, _der(0xA2, _der(0x80, obsolete))))
+    indirect_body = (
+        _der_seq(_der_oid(_OID_SPC_PE_IMAGE_DATA), pe_image_data)
+        + _der_seq(_der_alg(_OID_SHA256), _der(0x04, image_digest))
+    )
+    content_info = _der_seq(_der_oid(_OID_SPC_INDIRECT_DATA), _der(0xA0, _der_seq(indirect_body)))
+
+    # The signer signs its authenticated attributes; their messageDigest covers the
+    # content octets of SpcIndirectDataContent (without the outer tag and length).
+    attributes = [
+        _der_seq(_der_oid(_OID_CONTENT_TYPE), _der(0x31, _der_oid(_OID_SPC_INDIRECT_DATA))),
+        _der_seq(_der_oid(_OID_MESSAGE_DIGEST), _der(0x31, _der(0x04, hashlib.sha256(indirect_body).digest()))),
+    ]
+    attrs_body = b"".join(sorted(attributes))                 # DER: SET OF is sorted by encoding
+    signer_info = _der_seq(
+        _der_int(1),
+        _der_seq(root_name, _der_int(2)),                     # issuer and serial of the leaf certificate
+        _der_alg(_OID_SHA256),
+        _der(0xA0, attrs_body),                               # stored as [0] IMPLICIT ...
+        _der_alg(_OID_RSA),
+        _der(0x04, _fixture_rsa_sign(_der(0x31, attrs_body))),  # ... but signed with the SET tag
+    )
+    signed_data = _der_seq(
+        _der_int(1),
+        _der(0x31, _der_alg(_OID_SHA256)),
+        content_info,
+        _der(0xA0, root_cert + leaf_cert),
+        _der(0x31, signer_info),
+    )
+    return _der_seq(_der_oid(_OID_SIGNED_DATA), _der(0xA0, signed_data))
+
+
+def _write_if_changed(path: str, data: bytes) -> str:
+    """Write a deterministic fixture unless the file already holds exactly these bytes.
+    A fixture left by an older version is replaced; a read-only directory is tolerated."""
+    try:
+        with open(path, "rb") as handle:
+            if handle.read() == data:
+                return path
+    except OSError:
+        pass
+    try:
+        with open(path, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        if not os.path.isfile(path):
+            raise
+    return path
+
+
 def _build_synthetic_pe64(fixtures_dir: str) -> str:
     """
     Constructs a byte-exact 64-bit Windows PE32+ (`IMAGE_FILE_MACHINE_AMD64`) executable with:
@@ -873,15 +1055,29 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
       and `WS2_32.dll` (`WSAStartup`, ordinal `#115`)
     - Export Directory exporting `InitializeEngine` and a forwarded export `LegacyAlloc -> NTDLL.RtlAllocateHeap`
     - Debug Directory with `IMAGE_DEBUG_TYPE_CODEVIEW` (`RSDS` PDB signature, GUID, age, PDB path)
-    - Load Config Directory (`SecurityCookie` `/GS` + Control Flow Guard flags)
+    - Load Config Directory (`SecurityCookie` `/GS`; Control Flow Guard: `GuardFlags`, check-function
+      pointer and a one-entry Guard CF function table, consistent with the `GUARD_CF` header flag)
     - Base Relocation Table (`.reloc` with `IMAGE_REL_BASED_DIR64`)
-    - Security Directory (`WIN_CERTIFICATE` Authenticode PKCS#7 signed data with CN=`BinaryStudio Synthetic Corp`)
+    - Security Directory (`WIN_CERTIFICATE`: a structurally complete Authenticode PKCS#7 whose
+      `SpcIndirectDataContent` holds this image's SHA-256 Authenticode hash, signed by the synthetic
+      fixture chain CN=`BinaryStudio Synthetic Corp`; see `synthetic_authenticode_pkcs7`)
+    - a correct `OptionalHeader.CheckSum`
+
+    The image is deterministic. An existing file with different bytes (a fixture written by an
+    older version) is replaced.
     """
     out_path = os.path.join(fixtures_dir, "synthetic_pe64.exe")
-    if os.path.isfile(out_path) and os.path.getsize(out_path) >= 6144:
-        return out_path
+    return _write_if_changed(out_path, synthetic_pe64_bytes())
 
-    img = bytearray(0x1C00)
+
+def synthetic_pe64_bytes() -> bytes:
+    """The bytes of the synthetic PE32+ fixture (see `_build_synthetic_pe64`)."""
+    import hashlib
+
+    from .pe_parser import authenticode_digest, pe_checksum, pe_layout
+
+    cert_off = 0x1800
+    img = bytearray(cert_off)
     image_base = 0x140000000
 
     # 1. DOS Header at 0x0000 (64 bytes, e_lfanew = 0x100)
@@ -925,18 +1121,18 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
     # Data Directories (16 * 8B = 128B):
     # 0: Export (RVA 0x2300, sz 0x90)
     # 1: Import (RVA 0x2000, sz 60)
-    # 4: Security (FileOffset 0x1800, sz 0x240)
-    # 5: BaseReloc (RVA 0x3000, sz 16)
+    # 4: Security (FileOffset 0x1800, size of the WIN_CERTIFICATE entry)
+    # 5: BaseReloc (RVA 0x3000, sz 32)
     # 6: Debug (RVA 0x2400, sz 28)
-    # 10: LoadConfig (RVA 0x2500, sz 112)
+    # 10: LoadConfig (RVA 0x2700, sz 148)
     # 12: IAT (RVA 0x2080, sz 56)
     data_dirs = [(0, 0)] * 16
     data_dirs[0] = (0x2300, 0x90)
     data_dirs[1] = (0x2000, 60)
-    data_dirs[4] = (0x1800, 0x240)
-    data_dirs[5] = (0x3000, 16)
+    data_dirs[4] = (cert_off, 0)   # size is filled in once the signature has been built
+    data_dirs[5] = (0x3000, 32)
     data_dirs[6] = (0x2400, 28)
-    data_dirs[10] = (0x2500, 112)
+    data_dirs[10] = (0x2700, 148)
     data_dirs[12] = (0x2080, 56)
 
     # DllCharacteristics = 0x4160 (HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT | GUARD_CF)
@@ -962,7 +1158,7 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
         0,  # Win32VersionValue
         0x4000,  # SizeOfImage
         0x400,  # SizeOfHeaders
-        0x00018A42,  # CheckSum
+        0,  # CheckSum (computed over the finished file, below)
         3,  # Subsystem (WINDOWS_CUI)
         0x4160,  # DllCharacteristics
         0x100000,
@@ -977,12 +1173,12 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
 
     # Section Headers at 0x208 (3 * 40 bytes):
     # 1. .text: RVA 0x1000, VSize 0x300, RawPtr 0x400, RawSize 0x400, Characteristics 0x60000020 (CNT_CODE | MEM_EXECUTE | MEM_READ)
-    # 2. .rdata: RVA 0x2000, VSize 0x700, RawPtr 0x800, RawSize 0xC00, Characteristics 0x40000040 (CNT_INITIALIZED_DATA | MEM_READ)
+    # 2. .rdata: RVA 0x2000, VSize 0x800, RawPtr 0x800, RawSize 0xC00, Characteristics 0x40000040 (CNT_INITIALIZED_DATA | MEM_READ)
     # 3. .reloc: RVA 0x3000, VSize 0x100, RawPtr 0x1400, RawSize 0x400, Characteristics 0x42000040 (CNT_INITIALIZED_DATA | MEM_DISCARDABLE | MEM_READ)
     sh_off = nt_off + 264
     sec_hdrs = (
         struct.pack("<8sIIIIIIHHI", b".text\x00\x00\x00", 0x300, 0x1000, 0x400, 0x400, 0, 0, 0, 0, 0x60000020)
-        + struct.pack("<8sIIIIIIHHI", b".rdata\x00\x00", 0x700, 0x2000, 0xC00, 0x800, 0, 0, 0, 0, 0x40000040)
+        + struct.pack("<8sIIIIIIHHI", b".rdata\x00\x00", 0x800, 0x2000, 0xC00, 0x800, 0, 0, 0, 0, 0x40000040)
         + struct.pack("<8sIIIIIIHHI", b".reloc\x00\x00", 0x100, 0x3000, 0x400, 0x1400, 0, 0, 0, 0, 0x42000040)
     )
     img[sh_off : sh_off + len(sec_hdrs)] = sec_hdrs
@@ -1084,11 +1280,27 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
     img[rva_to_off(0x2400) : rva_to_off(0x2400) + 28] = dbg_entry
     img[rva_to_off(0x2420) : rva_to_off(0x2420) + len(rsds_blob)] = rsds_blob
 
-    # Load Config Directory at RVA 0x2500 (112 bytes) with SecurityCookie = 0x0000000140002580
-    load_cfg = bytearray(112)
-    struct.pack_into("<I", load_cfg, 0, 112)  # Size
-    struct.pack_into("<Q", load_cfg, 0x58, image_base + 0x2580)  # SecurityCookie VA
-    img[rva_to_off(0x2500) : rva_to_off(0x2500) + 112] = load_cfg
+    # Load Config Directory at RVA 0x2700: IMAGE_LOAD_CONFIG_DIRECTORY64 up to and including
+    # GuardFlags (148 bytes, the layout of the first CFG-aware toolchains).
+    #   SecurityCookie               -> VA of the /GS cookie at RVA 0x27A0
+    #   GuardCFCheckFunctionPointer  -> VA of a pointer slot at RVA 0x27A8, which holds the VA of
+    #                                   the `ret` at RVA 0x101F (what an image contains on disk:
+    #                                   a check routine that does nothing until the loader
+    #                                   replaces the pointer)
+    #   GuardCFFunctionTable         -> VA of the table at RVA 0x27B0: one valid indirect-call
+    #                                   target, RVA 0x1000 (the exported InitializeEngine)
+    #   GuardFlags                   =  CF_INSTRUMENTED | CF_FUNCTION_TABLE_PRESENT
+    load_cfg = bytearray(148)
+    struct.pack_into("<I", load_cfg, 0, 148)  # Size
+    struct.pack_into("<Q", load_cfg, 0x58, image_base + 0x27A0)  # SecurityCookie VA
+    struct.pack_into("<Q", load_cfg, 0x70, image_base + 0x27A8)  # GuardCFCheckFunctionPointer VA
+    struct.pack_into("<Q", load_cfg, 0x80, image_base + 0x27B0)  # GuardCFFunctionTable VA
+    struct.pack_into("<Q", load_cfg, 0x88, 1)  # GuardCFFunctionCount
+    struct.pack_into("<I", load_cfg, 0x90, 0x00000500)  # GuardFlags
+    img[rva_to_off(0x2700) : rva_to_off(0x2700) + 148] = load_cfg
+    struct.pack_into("<Q", img, rva_to_off(0x27A0), 0x00002B992DDFA232)  # the compiler's default cookie value
+    struct.pack_into("<Q", img, rva_to_off(0x27A8), image_base + 0x101F)
+    struct.pack_into("<I", img, rva_to_off(0x27B0), 0x1000)
 
     # ASCII & UTF-16LE strings in .rdata at RVA 0x2580
     ascii_str = b"PE32+_TELEMETRY_AGENT::https://api.binarystudio.dev/v2/symbols\x00Software\\Microsoft\\Windows\\CurrentVersion\\Run\x00"
@@ -1096,10 +1308,11 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
     img[rva_to_off(0x2580) : rva_to_off(0x2580) + len(ascii_str)] = ascii_str
     img[rva_to_off(0x2600) : rva_to_off(0x2600) + len(utf16_str)] = utf16_str
 
-    # 6. Populate .reloc at file offset 0x1400 (RVA 0x3000)
-    # 1 block of 16 bytes: Page RVA = 0x1000, SizeOfBlock = 16, 4 entries:
-    # (IMAGE_REL_BASED_DIR64=10 << 12) | 0x010, (10 << 12) | 0x020, (10 << 12) | 0x030, ABSOLUTE=0 padding
-    reloc_block = struct.pack(
+    # 6. Populate .reloc at file offset 0x1400 (RVA 0x3000): two blocks.
+    # Page 0x1000, SizeOfBlock 16: (IMAGE_REL_BASED_DIR64=10 << 12) | 0x010, | 0x020, | 0x030, ABSOLUTE=0 padding
+    # Page 0x2000, SizeOfBlock 16: the four absolute pointers of the load configuration
+    #   (SecurityCookie, GuardCFCheckFunctionPointer, GuardCFFunctionTable) and the check-function slot.
+    reloc_blocks = struct.pack(
         "<IIHHHH",
         0x1000,
         16,
@@ -1107,28 +1320,32 @@ def _build_synthetic_pe64(fixtures_dir: str) -> str:
         (10 << 12) | 0x020,
         (10 << 12) | 0x030,
         0,
+    ) + struct.pack(
+        "<IIHHHH",
+        0x2000,
+        16,
+        (10 << 12) | 0x758,
+        (10 << 12) | 0x770,
+        (10 << 12) | 0x780,
+        (10 << 12) | 0x7A8,
     )
-    img[0x1400 : 0x1400 + len(reloc_block)] = reloc_block
+    img[0x1400 : 0x1400 + len(reloc_blocks)] = reloc_blocks
 
-    # 7. Populate WIN_CERTIFICATE (Authenticode PKCS#7) at file offset 0x1800
-    # In X.509 TBSCertificate, Issuer CN appears first, followed by Subject CN
-    cn_str = b"BinaryStudio Synthetic Corp"
-    issuer_str = b"BinaryStudio Root Code Signing CA"
-    pkcs7_der = (
-        b"\x30\x82\x01\x00\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x07\x02"
-        + b"\x06\x03\x55\x04\x03\x0c"
-        + bytes([len(issuer_str)])
-        + issuer_str
-        + b"\x06\x03\x55\x04\x03\x0c"
-        + bytes([len(cn_str)])
-        + cn_str
-    )
+    # 7. WIN_CERTIFICATE at file offset 0x1800, after the last section. The Authenticode hash
+    # leaves out the CheckSum field, the certificate-table directory entry and the table itself,
+    # so it can be taken before any of the three has its final value.
+    layout = pe_layout(bytes(img))
+    assert layout is not None and layout["cert_dir_off"] is not None
+    image_digest = bytes.fromhex(authenticode_digest(bytes(img), layout, "sha256"))
+    pkcs7_der = synthetic_authenticode_pkcs7(image_digest)
     win_cert = struct.pack("<IHH", 8 + len(pkcs7_der), 0x0200, 0x0002) + pkcs7_der
-    img[0x1800 : 0x1800 + len(win_cert)] = win_cert
+    win_cert += b"\x00" * (-len(win_cert) % 8)          # entries are aligned to 8 bytes
+    struct.pack_into("<II", img, layout["cert_dir_off"], cert_off, len(win_cert))
+    img += win_cert
 
-    with open(out_path, "wb") as f:
-        f.write(img)
-    return out_path
+    # 8. CheckSum, over the finished file.
+    struct.pack_into("<I", img, layout["checksum_off"], pe_checksum(bytes(img), layout["checksum_off"]))
+    return bytes(img)
 
 
 def _build_synthetic_pe32(fixtures_dir: str) -> str:

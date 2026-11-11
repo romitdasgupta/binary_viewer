@@ -1,0 +1,787 @@
+/* ==========================================================================
+   BinaryStudio — Learn: curriculum, glossary, tours, field reference and the
+   Learn-mode affordances in the analysis views.
+   Colours come from the core's custom properties, so both themes are covered.
+   ========================================================================== */
+
+/* ---- Reading views ------------------------------------------------------- */
+.learn-view {
+  padding: 16px 18px 28px;
+  max-width: 92ch;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.learn-view.learn-wide {
+  max-width: none;
+}
+.learn-view h2,
+.learn-view h3,
+.learn-view h4 {
+  margin: 0;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.learn-view h3 {
+  font-size: 12px;
+  margin: 22px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.learn-view p {
+  margin: 0 0 9px;
+}
+.learn-view code,
+.learn-popover code,
+.learn-tour-panel code,
+.learn-idiom-row code {
+  font-family: var(--font-mono);
+  font-size: 0.93em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--text-bright);
+  overflow-wrap: anywhere;
+}
+.learn-view kbd,
+.learn-tour-panel kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+.learn-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.learn-lead {
+  color: var(--text-secondary);
+  max-width: 80ch;
+}
+.learn-quiet,
+.learn-meta,
+.learn-see-reason {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.learn-hint {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  margin-top: 10px;
+}
+
+/* ---- Buttons and links ------------------------------------------------------ */
+.learn-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+}
+.learn-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+.learn-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.learn-btn-primary {
+  background: var(--hdr-bg);
+  border-color: var(--hdr-border);
+  color: var(--hdr-fg);
+  font-weight: 600;
+}
+.learn-btn-primary:hover:not(:disabled) {
+  background: var(--hdr-bg);
+  border-color: var(--hdr-fg);
+}
+.learn-btn-small {
+  min-height: 20px;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+.learn-btn[aria-pressed="true"] {
+  background: var(--ro-bg);
+  border-color: var(--ro-border);
+  color: var(--ro-fg);
+}
+.learn-mono {
+  font-family: var(--font-mono);
+  white-space: pre;
+}
+.learn-link {
+  appearance: none;
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--rx-fg);
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--rx-border);
+  text-underline-offset: 2px;
+}
+.learn-link:hover {
+  text-decoration-color: currentColor;
+}
+.learn-link-term {
+  color: inherit;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--hdr-fg);
+}
+
+/* ---- Learning path ---------------------------------------------------------- */
+.learn-hero {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.learn-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.learn-module {
+  margin-top: 20px;
+}
+.learn-module-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.learn-module-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.learn-module-summary {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  margin: 2px 0 8px;
+}
+.learn-concept-list,
+.learn-tour-list,
+.learn-see-list,
+.learn-chip-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.learn-concept-list {
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.learn-concept-list > li + li {
+  border-top: 1px solid var(--border-subtle);
+}
+.learn-concept-row {
+  appearance: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.learn-concept-row:hover {
+  background: var(--bg-hover);
+}
+.learn-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+}
+.learn-dot.is-read {
+  background: var(--ro-fg);
+  border-color: var(--ro-fg);
+}
+.learn-concept-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.learn-concept-title {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.learn-concept-summary {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.learn-level {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+}
+.learn-level-3 {
+  color: var(--rw-fg);
+  border-color: var(--rw-border);
+}
+.learn-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+/* ---- Concept article ---------------------------------------------------------- */
+.learn-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.learn-title {
+  font-size: 18px !important;
+  line-height: 1.25;
+  outline: none;
+}
+.learn-summary {
+  margin-top: 6px !important;
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 76ch;
+}
+.learn-prose ul,
+.learn-prose ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+.learn-prose li {
+  margin-bottom: 4px;
+}
+.learn-note {
+  padding: 7px 10px;
+  border-left: 3px solid var(--rw-border);
+  background: var(--rw-bg);
+  border-radius: 0 4px 4px 0;
+  font-size: 12px;
+}
+.learn-code {
+  margin: 0 0 10px;
+}
+.learn-code pre {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.learn-code figcaption {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.learn-table-wrap {
+  overflow-x: auto;
+  margin: 0 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+.learn-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.learn-table th,
+.learn-table td {
+  padding: 6px 9px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.learn-table tr:last-child > th,
+.learn-table tr:last-child > td {
+  border-bottom: 0;
+}
+.learn-table thead th {
+  background: var(--bg-elevated);
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.learn-table tbody th {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.learn-table .is-active {
+  background: var(--tint-accent);
+}
+.learn-format-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.learn-format {
+  padding: 9px 11px 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.learn-format.is-active {
+  border-color: var(--rx-border);
+  background: var(--tint-accent);
+}
+.learn-format h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  margin-bottom: 6px;
+}
+.learn-tag {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--rx-fg);
+  padding: 0 5px;
+  border: 1px solid var(--rx-border);
+  border-radius: 9px;
+}
+.learn-diff {
+  margin-top: 10px !important;
+  color: var(--text-secondary);
+}
+.learn-diff strong {
+  color: var(--text-primary);
+}
+.learn-see-list {
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.learn-see-list > li {
+  padding: 6px 11px;
+}
+.learn-see-list > li + li {
+  border-top: 1px solid var(--border-subtle);
+}
+.learn-see-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.learn-see-item.is-missing .learn-see-label {
+  color: var(--text-secondary);
+}
+.learn-see-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 22px;
+}
+.learn-wrong {
+  margin: 0;
+}
+.learn-wrong > div {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.learn-wrong > div:last-child {
+  border-bottom: 0;
+}
+.learn-wrong dt {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.learn-wrong dt::before {
+  content: "\201C";
+}
+.learn-wrong dt::after {
+  content: "\201D";
+}
+.learn-wrong dd {
+  margin: 2px 0 0;
+}
+.learn-foot {
+  margin-top: 24px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+.learn-foot-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.learn-sources {
+  margin-top: 10px !important;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ---- Tours list ---------------------------------------------------------------- */
+.learn-tour-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.learn-tour-card {
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.learn-tour-card.is-focus,
+.learn-term-entry.is-focus {
+  border-color: var(--hdr-border);
+  background: var(--tint-learn);
+}
+.learn-tour-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.learn-tour-card-title {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.learn-tour-card-summary {
+  color: var(--text-secondary);
+  margin: 3px 0 8px !important;
+}
+.learn-tour-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.learn-status {
+  font-size: 11px;
+  color: var(--ro-fg);
+}
+
+/* ---- Glossary and field reference ------------------------------------------------ */
+.learn-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.learn-search {
+  width: 260px;
+  max-width: 100%;
+}
+.learn-terms {
+  margin: 0;
+}
+.learn-term-entry {
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-bottom-color: var(--border-subtle);
+  border-radius: 4px;
+}
+.learn-term-entry dt {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.learn-aka {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.learn-term-entry dd {
+  margin: 2px 0 0;
+}
+.learn-term-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  margin-top: 3px;
+  font-size: 11.5px;
+}
+.learn-struct-title {
+  font-family: var(--font-mono);
+  font-size: 12px !important;
+  border-bottom: 0 !important;
+}
+.learn-field-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.learn-fields-table td {
+  min-width: 150px;
+}
+.learn-compare th[scope="row"] {
+  min-width: 130px;
+}
+.learn-compare td {
+  min-width: 190px;
+}
+.learn-compare-go {
+  display: block;
+  margin-top: 5px;
+}
+.learn-modal-terms,
+.learn-confirm {
+  padding: 4px 2px;
+  max-width: 64ch;
+}
+
+/* ---- Tour panel (docked under the inspector) ------------------------------------- */
+.learn-tour-panel {
+  flex: none;
+  max-height: 46%;
+  display: flex;
+  flex-direction: column;
+  border-top: 2px solid var(--hdr-border);
+  background: var(--bg-panel);
+  font-size: 12.5px;
+  line-height: 1.5;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.learn-tour-panel[hidden] {
+  display: none;
+}
+.learn-tour-panel.is-floating {
+  position: fixed;
+  right: 16px;
+  bottom: 40px;
+  width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--hdr-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px var(--shadow);
+  z-index: 900;
+}
+.learn-tour-head,
+.learn-tour-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+.learn-tour-head {
+  background: var(--tint-learn);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.learn-tour-foot {
+  border-top: 1px solid var(--border-subtle);
+}
+.learn-tour-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hdr-fg);
+}
+.learn-tour-name {
+  color: var(--text-bright);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.learn-tour-spacer {
+  flex: 1;
+}
+.learn-tour-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px 6px;
+  max-width: 96ch;
+}
+.learn-tour-body[hidden],
+.learn-tour-foot[hidden] {
+  display: none;
+}
+.learn-tour-step-title {
+  margin: 0 0 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  outline: none;
+}
+.learn-tour-panel p {
+  margin: 0 0 8px;
+}
+.learn-tour-keys {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.learn-task {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--hdr-border);
+  border-radius: 5px;
+  background: var(--tint-learn);
+}
+.learn-task.is-solved {
+  border-color: var(--ro-border);
+  background: var(--ro-bg);
+}
+.learn-task-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hdr-fg);
+}
+.learn-task.is-solved .learn-task-label {
+  color: var(--ro-fg);
+}
+.learn-task-prompt {
+  margin: 2px 0 7px !important;
+}
+.learn-task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.learn-task-options {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.learn-task-input {
+  width: 200px;
+  font-family: var(--font-mono);
+}
+.learn-task-feedback:empty {
+  display: none;
+}
+.learn-task-feedback {
+  margin-bottom: 4px;
+}
+.learn-task-feedback.is-bad {
+  color: var(--rw-fg);
+}
+
+/* ---- Learn mode inside the analysis views ---------------------------------------- */
+.learn-on .learn-term {
+  text-decoration: underline dotted var(--hdr-fg);
+  text-underline-offset: 2px;
+  cursor: help;
+}
+.learn-on .learn-insn {
+  cursor: help;
+}
+.learn-on tr.disasm-row:hover .learn-insn,
+.learn-on tr.disasm-row:focus .learn-insn {
+  text-decoration: underline dotted var(--hdr-fg);
+  text-underline-offset: 2px;
+}
+.learn-popover {
+  position: fixed;
+  z-index: 1600;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  padding: 9px 11px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-header);
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.learn-popover[hidden] {
+  display: none;
+}
+.learn-popover p {
+  margin: 4px 0 6px;
+}
+.learn-pop-title {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.learn-pop-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  font-size: 11.5px;
+}
+.learn-pop-links:empty {
+  display: none;
+}
+.learn-more {
+  margin-top: 2px;
+}
+.learn-idiom-row > td {
+  padding: 5px 10px 5px 12px !important;
+  border-left: 3px solid var(--hdr-fg);
+  background: var(--tint-learn);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: normal;
+  color: var(--text-primary);
+}
+.learn-idiom-title {
+  margin-right: 8px;
+  font-weight: 600;
+  color: var(--hdr-fg);
+}
+.learn-on .learn-idiom-in > td:first-child {
+  box-shadow: inset 3px 0 0 var(--hdr-border);
+}
+
+@media (max-width: 760px) {
+  .learn-view {
+    padding: 12px;
+  }
+  .learn-tour-panel {
+    max-height: 60%;
+  }
+  .learn-tour-keys {
+    display: none;
+  }
+}

@@ -9,9 +9,13 @@ import re
 import struct
 from typing import Any, Dict, List, Optional, Tuple
 
-from .buffer import BinaryBuffer, make_region
+from . import runtime
+from .buffer import BinaryBuffer, BinaryFormatError, SegmentLookup, add_warning, make_region
+from .constants import ANALYSIS_LIMITS
 
 ELF_MAGIC = b"\x7fELF"
+# A whole NUL-delimited C string made only of printable ASCII / tab / LF / CR.
+_CSTRING_RUN_3 = re.compile(rb"(?:^|(?<=\x00))[\x20-\x7e\t\n\r]{3,}(?=\x00|\Z)")
 
 ELFCLASS32 = 1
 ELFCLASS64 = 2
@@ -50,7 +54,7 @@ ELF_TYPE_INFO: Dict[int, Tuple[str, str]] = {
 
 ELF_MACHINE_INFO: Dict[int, Tuple[str, str, str]] = {
     3: ("i386", "EM_386", "Intel 80386 (x86 32-bit)"),
-    8: ("mips", "EM_MIPS", "MIPS R3000/R4000"),
+    8: ("mips", "EM_MIPS", "MIPS (all MIPS I to MIPS64 variants)"),
     20: ("ppc", "EM_PPC", "PowerPC 32-bit"),
     21: ("ppc64", "EM_PPC64", "PowerPC 64-bit"),
     40: ("arm", "EM_ARM", "ARM 32-bit (AArch32 / Thumb)"),
@@ -106,6 +110,7 @@ SHT_DYNSYM = 11
 SHT_INIT_ARRAY = 14
 SHT_FINI_ARRAY = 15
 SHT_PREINIT_ARRAY = 16
+SHT_RELR = 19
 SHT_GNU_HASH = 0x6FFFFFF6
 SHT_GNU_VERDEF = 0x6FFFFFFD
 SHT_GNU_VERNEED = 0x6FFFFFFE
@@ -174,6 +179,10 @@ DT_RUNPATH = 29
 DT_FLAGS = 30
 DT_GNU_HASH = 0x6FFFFEF5
 DT_FLAGS_1 = 0x6FFFFFFB
+DT_RELR = 36
+DT_VERSYM = 0x6FFFFFF0
+DT_VERNEED = 0x6FFFFFFE
+DT_VERNEEDNUM = 0x6FFFFFFF
 
 DYNAMIC_TAG_NAMES: Dict[int, str] = {
     DT_NULL: "DT_NULL",
@@ -322,12 +331,43 @@ def _shf_to_attrs(sh_flags: int) -> Tuple[List[str], List[Dict[str, Any]]]:
     return names, bits
 
 
-def _read_strtab(blob: bytes, str_off: int) -> str:
+class _StrTable:
+    """
+    Zero-copy view of a string table inside the file. Lookups are bounded to the
+    table and to max_len bytes, so neither huge nor unterminated tables cost more
+    than O(max_len) per string, and many sections sharing one table cost nothing.
+    """
+
+    __slots__ = ("data", "start", "end")
+
+    def __init__(self, data: bytes, start: int, size: int) -> None:
+        self.data = data
+        self.start = max(0, start)
+        self.end = max(self.start, min(len(data), start + max(0, size)))
+
+    def __bool__(self) -> bool:
+        return self.end > self.start
+
+    def get(self, off: int, max_len: int = 512) -> str:
+        if off < 0:
+            return ""
+        a = self.start + off
+        if a >= self.end:
+            return ""
+        lim = min(self.end, a + max_len)
+        nul = self.data.find(b"\x00", a, lim)
+        return self.data[a : (nul if nul != -1 else lim)].decode("utf-8", errors="replace")
+
+
+def _read_strtab(blob: Any, str_off: int, max_len: int = 512) -> str:
+    """NUL-terminated string at str_off, bounded so an unterminated table costs O(max_len)."""
+    if isinstance(blob, _StrTable):
+        return blob.get(str_off, max_len)
     if str_off < 0 or str_off >= len(blob):
         return ""
-    nul = blob.find(b"\x00", str_off)
+    nul = blob.find(b"\x00", str_off, str_off + max_len)
     if nul == -1:
-        return blob[str_off : str_off + 256].decode("utf-8", errors="replace")
+        return blob[str_off : str_off + max_len].decode("utf-8", errors="replace")
     return blob[str_off:nul].decode("utf-8", errors="replace")
 
 
@@ -363,6 +403,71 @@ def _demangle_elf_symbol(name: str) -> str:
     return name
 
 
+# ---------------------------------------------------------------------------
+# .note.gnu.property (NT_GNU_PROPERTY_TYPE_0)
+# ---------------------------------------------------------------------------
+# Property types 0xc0000000..0xdfffffff are processor-specific: the same number
+# means different things on different machines (0xc0000000 is the AArch64
+# feature word; on x86 the feature word is 0xc0000002), so a property is only
+# decoded against the table of the file's own e_machine.
+EM_386 = 3
+EM_X86_64 = 62
+EM_AARCH64 = 183
+
+_GNU_PROPERTY_GENERIC: Dict[int, Tuple[str, List[Tuple[int, str]]]] = {
+    1: ("GNU_PROPERTY_STACK_SIZE", []),
+    2: ("GNU_PROPERTY_NO_COPY_ON_PROTECTED", []),
+    0xB0008000: ("GNU_PROPERTY_1_NEEDED", [(0x1, "INDIRECT_EXTERN_ACCESS")]),
+}
+_GNU_PROPERTY_X86: Dict[int, Tuple[str, List[Tuple[int, str]]]] = {
+    0xC0000002: ("GNU_PROPERTY_X86_FEATURE_1_AND", [(0x1, "IBT"), (0x2, "SHSTK")]),
+    0xC0008002: ("GNU_PROPERTY_X86_ISA_1_NEEDED", [(0x1, "x86-64-baseline"), (0x2, "x86-64-v2"), (0x4, "x86-64-v3"), (0x8, "x86-64-v4")]),
+    0xC0010002: ("GNU_PROPERTY_X86_ISA_1_USED", [(0x1, "x86-64-baseline"), (0x2, "x86-64-v2"), (0x4, "x86-64-v3"), (0x8, "x86-64-v4")]),
+    0xC0008001: ("GNU_PROPERTY_X86_FEATURE_2_NEEDED", []),
+    0xC0010001: ("GNU_PROPERTY_X86_FEATURE_2_USED", []),
+}
+_GNU_PROPERTY_AARCH64: Dict[int, Tuple[str, List[Tuple[int, str]]]] = {
+    0xC0000000: ("GNU_PROPERTY_AARCH64_FEATURE_1_AND", [(0x1, "BTI"), (0x2, "PAC"), (0x4, "GCS")]),
+}
+# Names shown in the hardening audit for the control-flow bits of the feature word.
+_GNU_CFI_LABELS: Dict[Tuple[str, str], str] = {
+    ("GNU_PROPERTY_X86_FEATURE_1_AND", "IBT"): "Intel CET IBT",
+    ("GNU_PROPERTY_X86_FEATURE_1_AND", "SHSTK"): "Intel CET SHSTK",
+    ("GNU_PROPERTY_AARCH64_FEATURE_1_AND", "BTI"): "ARM64 BTI",
+    ("GNU_PROPERTY_AARCH64_FEATURE_1_AND", "PAC"): "ARM64 PAC",
+    ("GNU_PROPERTY_AARCH64_FEATURE_1_AND", "GCS"): "ARM64 GCS",
+}
+
+
+def decode_gnu_property(e_machine: int, pr_type: int, data: bytes, endian_char: str = "<") -> Dict[str, Any]:
+    """One property of an NT_GNU_PROPERTY_TYPE_0 note, decoded for `e_machine`.
+
+    Returns {type, type_name, value, flags, cfi, known}. `cfi` lists the
+    control-flow features the property declares (the labels used by the audit);
+    a processor-specific type that this machine does not define is reported by
+    number and decodes to nothing.
+    """
+    table = dict(_GNU_PROPERTY_GENERIC)
+    if e_machine in (EM_386, EM_X86_64):
+        table.update(_GNU_PROPERTY_X86)
+    elif e_machine == EM_AARCH64:
+        table.update(_GNU_PROPERTY_AARCH64)
+    value: Optional[int] = None
+    if len(data) >= 8 and pr_type == 1:
+        value = struct.unpack_from(endian_char + "Q", data, 0)[0]
+    elif len(data) >= 4:
+        value = struct.unpack_from(endian_char + "I", data, 0)[0]
+    entry = table.get(pr_type)
+    if entry is None:
+        scope = "processor-specific" if 0xC0000000 <= pr_type <= 0xDFFFFFFF else ("user" if pr_type >= 0xE0000000 else "generic")
+        return {"type": pr_type, "type_name": f"0x{pr_type:08x} ({scope}, not defined for this machine)",
+                "value": value, "flags": [], "cfi": [], "known": False}
+    name, bits = entry
+    flags = [label for mask, label in bits if value is not None and value & mask]
+    cfi = [_GNU_CFI_LABELS[(name, f)] for f in flags if (name, f) in _GNU_CFI_LABELS]
+    return {"type": pr_type, "type_name": name, "value": value, "flags": flags, "cfi": cfi, "known": True}
+
+
 def evaluate_elf_security_posture(
     e_type: int,
     e_machine: int,
@@ -385,13 +490,13 @@ def evaluate_elf_security_posture(
     has_interp = any(p["p_type"] == PT_INTERP for p in phdrs)
     is_pie = (e_type == ET_DYN)
     if e_type == ET_DYN:
-        kind_label = "PIE Executable (ET_DYN + DF_1_PIE)" if (df_1 & DF_1_PIE or has_interp) else "Position-Independent Shared Object (ET_DYN)"
+        kind_label = "PIE Executable (ET_DYN with DF_1_PIE or PT_INTERP)" if (df_1 & DF_1_PIE or has_interp) else "Position-Independent Shared Object (ET_DYN)"
         checks.append({
             "id": "pie",
             "title": "Position Independent Executable (PIE / ASLR)",
             "status": "PASS",
             "value": f"Enabled ({kind_label})",
-            "detail": "ELF header type is ET_DYN, allowing the OS kernel to map the binary at a randomized ASLR base address.",
+            "detail": "ELF header type is ET_DYN: every address in the file is relative to a load base chosen at run time (by the kernel for a PIE, by ld.so through mmap for a shared object), so ASLR can randomize it.",
         })
     elif e_type == ET_EXEC:
         checks.append({
@@ -399,7 +504,7 @@ def evaluate_elf_security_posture(
             "title": "Position Independent Executable (PIE / ASLR)",
             "status": "FAIL",
             "value": "Disabled (ET_EXEC Fixed Base)",
-            "detail": "ELF header type is ET_EXEC; code segments load at a predictable virtual address without ASLR randomization.",
+            "detail": "ELF header type is ET_EXEC; the image's own segments are mapped at the fixed addresses in its program headers. The stack, mmap regions and shared libraries are still randomized.",
         })
     else:
         checks.append({
@@ -407,7 +512,7 @@ def evaluate_elf_security_posture(
             "title": "Position Independent Executable (PIE / ASLR)",
             "status": "INFO",
             "value": f"{ELF_TYPE_INFO.get(e_type, ('ELF', ''))[0]}",
-            "detail": "Relocatable object or core dump image.",
+            "detail": "Not a loadable image (relocatable object, core dump or other type); load-address randomization does not apply.",
         })
 
     # 2. RELRO (Relocation Read-Only)
@@ -423,7 +528,7 @@ def evaluate_elf_security_posture(
             "title": "GOT Hardening (RELRO & BIND_NOW)",
             "status": "PASS",
             "value": "Full RELRO (PT_GNU_RELRO + BIND_NOW)",
-            "detail": "All GOT & .got.plt slots are resolved eagerly by ld.so at startup and locked Read-Only via mprotect().",
+            "detail": "A BIND_NOW flag makes ld.so resolve every GOT and PLT slot at startup; it then mprotect()s the PT_GNU_RELRO range, which the linker laid out to include .got.plt, read-only.",
         })
     elif has_relro_phdr:
         checks.append({
@@ -431,7 +536,7 @@ def evaluate_elf_security_posture(
             "title": "GOT Hardening (RELRO & BIND_NOW)",
             "status": "WARN",
             "value": "Partial RELRO (PT_GNU_RELRO only)",
-            "detail": "Non-PLT GOT is read-only, but lazy binding leaves .got.plt writable during runtime execution.",
+            "detail": "ld.so makes the PT_GNU_RELRO range (.got, .dynamic, .init_array, ...) read-only after relocation, but without BIND_NOW the lazily bound PLT slots in .got.plt stay writable.",
         })
     else:
         checks.append({
@@ -439,7 +544,7 @@ def evaluate_elf_security_posture(
             "title": "GOT Hardening (RELRO & BIND_NOW)",
             "status": "FAIL" if e_type in (ET_EXEC, ET_DYN) else "INFO",
             "value": "No RELRO",
-            "detail": "Global Offset Table (.got) remains writable throughout process execution, permitting GOT overwrite attacks.",
+            "detail": "No PT_GNU_RELRO segment: the GOT and other relocated pointers stay writable for the life of the process, so a memory-write bug can redirect calls through them.",
         })
 
     # 3. Non-Executable Stack (PT_GNU_STACK)
@@ -452,15 +557,15 @@ def evaluate_elf_security_posture(
                 "title": "Non-Executable Stack (NX / PT_GNU_STACK)",
                 "status": "FAIL",
                 "value": "Executable Stack (RWE)",
-                "detail": "PT_GNU_STACK has PF_X set; stack memory can execute injected shellcode directly.",
+                "detail": "PT_GNU_STACK has PF_X set, so Linux maps the stack executable; data written to the stack can be run as code.",
             })
         else:
             checks.append({
                 "id": "nx_stack",
                 "title": "Non-Executable Stack (NX / PT_GNU_STACK)",
                 "status": "PASS",
-                "value": "Enforced (RW- Non-Executable)",
-                "detail": "PT_GNU_STACK omits PF_X, ensuring hardware NX/XD protection on stack pages.",
+                "value": "Requested (RW- Non-Executable)",
+                "detail": "PT_GNU_STACK omits PF_X, so the kernel maps the stack without execute permission (enforced where the CPU has NX).",
             })
     else:
         checks.append({
@@ -468,7 +573,7 @@ def evaluate_elf_security_posture(
             "title": "Non-Executable Stack (NX / PT_GNU_STACK)",
             "status": "WARN" if e_type in (ET_EXEC, ET_DYN) else "INFO",
             "value": "Missing PT_GNU_STACK Header",
-            "detail": "No PT_GNU_STACK program header present; stack permissions depend on kernel/architecture defaults.",
+            "detail": "No PT_GNU_STACK program header; the kernel applies its per-architecture default. Linux 5.8 and later: non-executable on x86-64 and arm64; on 32-bit x86 and 32-bit ARM the stack is executable and READ_IMPLIES_EXEC makes every readable mapping executable.",
         })
 
     # 4. Stack Canary
@@ -482,7 +587,7 @@ def evaluate_elf_security_posture(
             "title": "Stack Smashing Protection (Canary)",
             "status": "PASS",
             "value": "Present (__stack_chk_fail)",
-            "detail": "Compiler stack buffer overflow canary check symbols are linked.",
+            "detail": "The stack-protector failure handler or guard is referenced, so at least one function checks a canary before returning. Which functions are covered depends on the -fstack-protector level used.",
         })
     else:
         checks.append({
@@ -490,7 +595,7 @@ def evaluate_elf_security_posture(
             "title": "Stack Smashing Protection (Canary)",
             "status": "INFO",
             "value": "Not Detected",
-            "detail": "No __stack_chk_fail symbol found (compiled without -fstack-protector or no stack-buffer functions).",
+            "detail": "No __stack_chk_fail symbol found: built without -fstack-protector, no function met the instrumentation criteria, or the name is gone (statically linked and stripped).",
         })
 
     # 5. Hardware Control-Flow Integrity (Intel CET IBT/SHSTK or ARM64 PAC/BTI)
@@ -501,7 +606,7 @@ def evaluate_elf_security_posture(
             "title": "Hardware Control-Flow Integrity (CET / PAC / BTI)",
             "status": "PASS",
             "value": " | ".join(gnu_properties),
-            "detail": "ELF .note.gnu.property advertises hardware forward/backward-edge control-flow protection.",
+            "detail": "The .note.gnu.property note marks the image as compatible with these features (IBT/BTI: indirect-branch landing pads; SHSTK/GCS: shadow stack; PAC: signed return addresses). The note is decoded for this file's machine: x86 and AArch64 use different property numbers. Enforcement still depends on CPU, kernel and libc support.",
         })
     else:
         checks.append({
@@ -509,7 +614,7 @@ def evaluate_elf_security_posture(
             "title": "Hardware Control-Flow Integrity (CET / PAC / BTI)",
             "status": "INFO",
             "value": "Baseline ABI (No CET/BTI Note)",
-            "detail": "No .note.gnu.property hardware CET (IBT/SHSTK) or AArch64 (BTI/PAC) feature flags detected.",
+            "detail": "No .note.gnu.property x86 CET (IBT/SHSTK) or AArch64 (BTI/PAC) feature bits found.",
         })
 
     # 6. W^X Memory Protection Hygiene
@@ -528,14 +633,14 @@ def evaluate_elf_security_posture(
             "title": "W^X Memory Protection Hygiene",
             "status": "FAIL",
             "value": f"RWX / TEXTREL: {', '.join(rwx_segs)}",
-            "detail": "One or more PT_LOAD segments allow simultaneous Write and Execute permissions.",
+            "detail": "A PT_LOAD segment is both writable and executable, or the image has text relocations (DT_TEXTREL / DF_TEXTREL), which make ld.so write to code pages while relocating.",
         })
     else:
         checks.append({
             "id": "rwx",
             "title": "W^X Memory Protection Hygiene",
             "status": "PASS",
-            "value": "Strict W^X Enforced",
+            "value": "No W+X segment requested",
             "detail": "No PT_LOAD segment has simultaneous PF_W and PF_X flags, and no DT_TEXTREL is present.",
         })
 
@@ -547,7 +652,7 @@ def evaluate_elf_security_posture(
             "title": "Libc Buffer Fortification (_FORTIFY_SOURCE)",
             "status": "PASS",
             "value": f"Enabled ({len(fortified_syms)} *_chk symbols)",
-            "detail": f"Uses bounds-checked glibc primitives: {', '.join(fortified_syms[:4])}.",
+            "detail": f"References length-checked libc variants emitted by _FORTIFY_SOURCE: {', '.join(fortified_syms[:4])}. Only calls where the compiler knew the destination size are checked.",
         })
     else:
         checks.append({
@@ -555,7 +660,7 @@ def evaluate_elf_security_posture(
             "title": "Libc Buffer Fortification (_FORTIFY_SOURCE)",
             "status": "INFO",
             "value": "No *_chk Symbols Detected",
-            "detail": "No fortified glibc __*_chk functions imported.",
+            "detail": "No __*_chk functions referenced: built without _FORTIFY_SOURCE or without optimization, or every checked call was resolved at compile time.",
         })
 
     # 8. RPATH / RUNPATH Hygiene
@@ -565,7 +670,7 @@ def evaluate_elf_security_posture(
             "title": "Dynamic Search Path (RPATH / RUNPATH) Hygiene",
             "status": "PASS",
             "value": "No DT_RPATH / DT_RUNPATH",
-            "detail": "Shared libraries are resolved exclusively via trusted system ld.so paths.",
+            "detail": "The image adds no search directories of its own. ld.so still consults LD_LIBRARY_PATH (ignored for setuid/setgid programs), the ld.so cache and the default library directories.",
         })
     else:
         rp_list = [r["path"] for r in rpaths]
@@ -592,7 +697,7 @@ def evaluate_elf_security_posture(
         "detail": (
             f"GNU Build-ID {build_id[:24]}... recorded in .note.gnu.build-id."
             if build_id
-            else "Static symbol table (.symtab) stripped for release."
+            else "No .note.gnu.build-id note found. The build ID is an identifier chosen by the linker (by default a hash of the output), not a signature."
         ),
     })
 
@@ -610,16 +715,17 @@ def evaluate_elf_security_posture(
         "has_restrict_segment": has_relro_phdr and has_bind_now,
         "is_encrypted": False,
         "stripped_symbols": not has_symtab,
+        # ELF has no embedded signature format; the build ID is in overview.uuid / elf_metadata.
         "code_signature": {
-            "present": bool(build_id),
+            "present": False,
             "is_adhoc": False,
-            "hardened_runtime": has_relro_phdr and has_bind_now,
+            "hardened_runtime": False,
             "library_validation": False,
-            "cdhash": build_id,
-            "cdhash_verified": bool(build_id),
-            "identifier": "GNU Build-ID" if build_id else "",
-            "team_id": "ELF .note.gnu.build-id" if build_id else "",
-            "certificates": gnu_properties,
+            "cdhash": "",
+            "cdhash_verified": False,
+            "identifier": "",
+            "team_id": "",
+            "certificates": [],
         },
         "checks": checks,
     }
@@ -627,7 +733,7 @@ def evaluate_elf_security_posture(
 
 def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     if len(full_data) < 52 or full_data[:4] != ELF_MAGIC:
-        raise ValueError("Invalid ELF magic header (expected 0x7f 'E' 'L' 'F').")
+        raise BinaryFormatError("Invalid ELF header (expected 0x7f 'E' 'L' 'F' and at least 52 bytes).")
 
     ei_class = full_data[4]
     ei_data = full_data[5]
@@ -714,6 +820,7 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
         buf.record_field("e_shstrndx", "uint16", 50, 2, e_shstrndx, str(e_shstrndx), f"Section #{e_shstrndx}", "Section header string table index")
 
     header_fields = buf.reset_fields()
+    warnings: List[Dict[str, Any]] = []
     intervals: List[Dict[str, Any]] = [
         {
             "id": "mach_header",
@@ -729,9 +836,14 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     # 1. Parse Section Header Table (Shdr)
     # ------------------------------------------------------------------------
     raw_shdrs: List[Dict[str, Any]] = []
-    shstrtab_bytes = b""
+    shstrtab_bytes: Any = b""
     sh_ent_sz = e_shentsize or (64 if is_64 else 40)
-    max_sh = min(e_shnum, 512) if (e_shoff > 0 and e_shoff < file_size) else 0
+    sh_limit = ANALYSIS_LIMITS["elf_section_headers"]
+    max_sh = min(e_shnum, sh_limit) if (e_shoff > 0 and e_shoff < file_size) else 0
+    if e_shnum > sh_limit and max_sh:
+        add_warning(warnings, "section_headers_truncated", f"e_shnum is {e_shnum:,}; only the first {sh_limit:,} section headers are parsed.", limit=sh_limit, total=e_shnum)
+    if e_shnum and e_shoff >= file_size:
+        add_warning(warnings, "section_headers_past_eof", "e_shoff points past the end of the file; section headers are not shown.")
 
     if max_sh > 0 and 0 <= e_shstrndx < max_sh:
         str_hdr_off = e_shoff + e_shstrndx * sh_ent_sz
@@ -739,11 +851,13 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             shstr_off = buf.u64(str_hdr_off + 24) if is_64 else buf.u32(str_hdr_off + 16)
             shstr_sz = buf.u64(str_hdr_off + 32) if is_64 else buf.u32(str_hdr_off + 20)
             if shstr_off < file_size:
-                shstrtab_bytes = buf.read_bytes(shstr_off, min(shstr_sz, file_size - shstr_off))
+                shstrtab_bytes = _StrTable(full_data, shstr_off, min(shstr_sz, file_size - shstr_off))
 
     for i in range(max_sh):
+        runtime.check_deadline()
         sh_off = e_shoff + i * sh_ent_sz
         if sh_off + sh_ent_sz > file_size:
+            add_warning(warnings, "section_headers_truncated_eof", f"Section header table is cut off by the end of the file after {i} entries.")
             break
         sh_buf = buf.clone_with_fields()
         sh_name_idx = sh_buf.u32(sh_off)
@@ -828,12 +942,17 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     phdrs: List[Dict[str, Any]] = []
     segments: List[Dict[str, Any]] = []
     ph_ent_sz = e_phentsize or (56 if is_64 else 32)
-    max_ph = min(e_phnum, 128) if (e_phoff > 0 and e_phoff < file_size) else 0
+    ph_limit = ANALYSIS_LIMITS["elf_program_headers"]
+    max_ph = min(e_phnum, ph_limit) if (e_phoff > 0 and e_phoff < file_size) else 0
+    if e_phnum > ph_limit and max_ph:
+        add_warning(warnings, "program_headers_truncated", f"e_phnum is {e_phnum:,}; only the first {ph_limit:,} program headers are parsed.", limit=ph_limit, total=e_phnum)
     interp_path = ""
 
     for i in range(max_ph):
+        runtime.check_deadline()
         ph_off = e_phoff + i * ph_ent_sz
         if ph_off + ph_ent_sz > file_size:
+            add_warning(warnings, "program_headers_truncated_eof", f"Program header table is cut off by the end of the file after {i} entries.")
             break
         ph_buf = buf.clone_with_fields()
         p_type = ph_buf.u32(ph_off)
@@ -917,9 +1036,20 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     # Build PT_LOAD segments & map Shdr sections into them
     all_sections_ordered: List[Dict[str, Any]] = []
     pt_loads = [p for p in phdrs if p["p_type"] == PT_LOAD]
+    if len(pt_loads) > ANALYSIS_LIMITS["segments"]:
+        add_warning(warnings, "segments_truncated", f"Only the first {ANALYSIS_LIMITS['segments']} PT_LOAD segments are mapped.", limit=ANALYSIS_LIMITS["segments"], total=len(pt_loads))
+        pt_loads = pt_loads[: ANALYSIS_LIMITS["segments"]]
     assigned_sh_indices = set()
+    # Sections that can live in a PT_LOAD, with their match keys precomputed;
+    # assigned ones are dropped so later segments scan fewer candidates.
+    mappable = [
+        (sh, sh["slice_offset"], sh["vmaddr_int"], sh["is_zerofill"])
+        for sh in raw_shdrs
+        if sh["sh_index"] != 0 and ((sh["sh_flags"] & SHF_ALLOC) or sh["sh_type"] in (SHT_NOTE, SHT_DYNAMIC))
+    ]
 
     for load_idx, pl in enumerate(pt_loads):
+        runtime.check_deadline()
         p_off = pl["p_offset"]
         p_fsz = pl["p_filesz"]
         p_vm = pl["p_vaddr"]
@@ -935,16 +1065,16 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             segname = f"LOAD_{load_idx}_RO"
 
         seg_sections: List[Dict[str, Any]] = []
-        for sh in raw_shdrs:
-            if sh["sh_index"] == 0 or sh["sh_index"] in assigned_sh_indices:
-                continue
-            if not (sh["sh_flags"] & SHF_ALLOC) and sh["sh_type"] not in (SHT_NOTE, SHT_DYNAMIC):
-                continue
-            sh_off = sh["slice_offset"]
-            sh_vm = sh["vmaddr_int"]
-            in_file_range = (not sh["is_zerofill"]) and (p_off <= sh_off < p_off + max(1, p_fsz))
-            in_vm_range = (p_msz > 0) and (p_vm <= sh_vm < p_vm + p_msz)
-            if in_file_range or in_vm_range:
+        file_end = p_off + max(1, p_fsz)
+        vm_end = p_vm + p_msz
+        still_unassigned = []
+        for entry in mappable:
+            sh, sh_off, sh_vm, sh_zf = entry
+            in_file_range = (not sh_zf) and (p_off <= sh_off < file_end)
+            in_vm_range = (p_msz > 0) and (p_vm <= sh_vm < vm_end)
+            if not (in_file_range or in_vm_range):
+                still_unassigned.append(entry)
+            else:
                 assigned_sh_indices.add(sh["sh_index"])
                 sec_copy = dict(sh)
                 sec_copy["index"] = len(all_sections_ordered)
@@ -975,6 +1105,7 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                         "size": sh["size"],
                         "vmaddr": sh["vmaddr"],
                     })
+        mappable = still_unassigned
 
         flag_list = [name for mask, name in ((PF_R, "PF_R"), (PF_W, "PF_W"), (PF_X, "PF_X")) if pl["p_flags"] & mask]
         seg_obj = {
@@ -1008,7 +1139,7 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     if not segments and unassigned_alloc:
         synth_vm = 0x10000
         seg_sections = []
-        min_off = min(s["slice_offset"] for s in unassigned_alloc if s["slice_offset"] > 0) if unassigned_alloc else 0
+        min_off = min((s["slice_offset"] for s in unassigned_alloc if s["slice_offset"] > 0), default=0)
         max_end = max(s["slice_offset"] + s["size"] for s in unassigned_alloc) if unassigned_alloc else file_size
         for sh in unassigned_alloc:
             sec_copy = dict(sh)
@@ -1070,18 +1201,18 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
         })
 
     # Helper to convert VMAddr -> file offset using PT_LOAD segments
+    seg_lookup = SegmentLookup(segments)
+
     def vm_to_file_off(vm: int) -> Optional[int]:
-        for seg in segments:
-            if seg["filesize"] > 0 and seg["vmaddr_int"] <= vm < seg["vmaddr_int"] + seg["filesize"]:
-                return seg["fileoff"] + (vm - seg["vmaddr_int"])
-        return None
+        return seg_lookup.file_offset(vm)
 
     # ------------------------------------------------------------------------
     # 3. Parse ELF Notes (.note.gnu.build-id, .note.ABI-tag, .note.gnu.property)
     # ------------------------------------------------------------------------
     build_id_hex = ""
     abi_minos_str = ""
-    gnu_properties: List[str] = []
+    gnu_properties: List[str] = []          # control-flow features declared for this machine (audit labels)
+    gnu_property_entries: List[Dict[str, Any]] = []   # every decoded property of the note
     notes_list: List[Dict[str, Any]] = []
     note_ranges: List[Tuple[int, int]] = []
     for p in phdrs:
@@ -1092,10 +1223,19 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             if sh["sh_type"] == SHT_NOTE and sh["size"] > 0:
                 note_ranges.append((sh["slice_offset"], sh["size"]))
 
+    notes_limit = ANALYSIS_LIMITS["elf_notes"]
+    seen_note_ranges = set()
     for n_off, n_sz in note_ranges:
+        if (n_off, n_sz) in seen_note_ranges:
+            continue
+        seen_note_ranges.add((n_off, n_sz))
         cur = n_off
         end = min(file_size, n_off + n_sz)
         while cur + 12 <= end:
+            if len(notes_list) >= notes_limit:
+                add_warning(warnings, "notes_truncated", f"Only the first {notes_limit} ELF notes are decoded.", limit=notes_limit)
+                break
+            runtime.check_deadline()
             note_start = cur
             namesz = buf.u32(cur)
             descsz = buf.u32(cur + 4)
@@ -1125,24 +1265,31 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 elif ntype == 5 and descsz >= 8:  # NT_GNU_PROPERTY_TYPE_0
                     note_type_name = "NT_GNU_PROPERTY_TYPE_0"
                     p_cur = 0
-                    while p_cur + 8 <= len(desc_bytes):
+                    prop_steps = 0
+                    note_props: List[str] = []
+                    align_step = 8 if is_64 else 4
+                    while p_cur + 8 <= len(desc_bytes) and prop_steps < 256:
+                        prop_steps += 1
                         pr_type, pr_datasz = struct.unpack_from(f"{buf.endian_char}II", desc_bytes, p_cur)
                         p_cur += 8
-                        if pr_datasz >= 4 and p_cur + 4 <= len(desc_bytes):
-                            pr_val = struct.unpack_from(f"{buf.endian_char}I", desc_bytes, p_cur)[0]
-                            if pr_type == 0xC0000002:  # GNU_PROPERTY_X86_FEATURE_1_AND
-                                if pr_val & 0x1:
-                                    gnu_properties.append("Intel CET IBT")
-                                if pr_val & 0x2:
-                                    gnu_properties.append("Intel CET SHSTK")
-                            elif pr_type == 0xC0000000:  # GNU_PROPERTY_AARCH64_FEATURE_1_AND
-                                if pr_val & 0x1:
-                                    gnu_properties.append("ARM64 BTI")
-                                if pr_val & 0x2:
-                                    gnu_properties.append("ARM64 PAC")
-                        align_step = 8 if is_64 else 4
+                        if p_cur + pr_datasz > len(desc_bytes):
+                            break
+                        prop = decode_gnu_property(e_machine, pr_type, desc_bytes[p_cur:p_cur + pr_datasz], buf.endian_char)
+                        prop["abs_offset"] = note_start + 12 + name_aligned + p_cur - 8
+                        prop["size"] = 8 + pr_datasz
+                        if len(gnu_property_entries) < 64:
+                            gnu_property_entries.append(prop)
+                        for label in prop["cfi"]:
+                            if label not in gnu_properties:
+                                gnu_properties.append(label)
+                        shown = prop["type_name"]
+                        if prop["flags"]:
+                            shown += " = " + " | ".join(prop["flags"])
+                        elif prop["value"] is not None:
+                            shown += f" = 0x{prop['value']:x}"
+                        note_props.append(shown)
                         p_cur += (pr_datasz + (align_step - 1)) & ~(align_step - 1)
-                    note_desc_str = ", ".join(gnu_properties) if gnu_properties else "GNU Property"
+                    note_desc_str = "; ".join(note_props) if note_props else "GNU Property"
             notes_list.append({
                 "name": n_name,
                 "type": ntype,
@@ -1171,16 +1318,19 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 break
 
     # Find .dynstr bytes
-    dynstr_bytes = b""
+    dynstr_bytes: Any = _StrTable(full_data, 0, 0)
     for sh in raw_shdrs:
         if sh["sectname"] == ".dynstr" and sh["size"] > 0 and sh["slice_offset"] < file_size:
-            dynstr_bytes = buf.read_bytes(sh["slice_offset"], min(sh["size"], file_size - sh["slice_offset"]))
+            dynstr_bytes = _StrTable(full_data, sh["slice_offset"], min(sh["size"], file_size - sh["slice_offset"]))
             break
 
     if dyn_off > 0 and dyn_off < file_size:
         d_ent_sz = 16 if is_64 else 8
-        n_dyn = min(256, dyn_sz // d_ent_sz)
+        dyn_limit = ANALYSIS_LIMITS["elf_dynamic_entries"]
+        n_dyn = min(dyn_limit, dyn_sz // d_ent_sz)
         for i in range(n_dyn):
+            if i == dyn_limit - 1:
+                add_warning(warnings, "dynamic_truncated", f"Only the first {dyn_limit} .dynamic entries are read.", limit=dyn_limit)
             pos = dyn_off + i * d_ent_sz
             if pos + d_ent_sz > file_size:
                 break
@@ -1195,7 +1345,7 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             st_foff = vm_to_file_off(dyn_tags[DT_STRTAB][0])
             st_sz = dyn_tags.get(DT_STRSZ, [4096])[0]
             if st_foff is not None and st_foff < file_size:
-                dynstr_bytes = buf.read_bytes(st_foff, min(st_sz, file_size - st_foff))
+                dynstr_bytes = _StrTable(full_data, st_foff, min(st_sz, file_size - st_foff))
 
         for val in dyn_tags.get(DT_NEEDED, []):
             lib_name = _read_strtab(dynstr_bytes, val) or f"lib_offset_{val}"
@@ -1223,12 +1373,91 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                         })
 
     # ------------------------------------------------------------------------
+    # 4b. Symbol versioning (.gnu.version / .gnu.version_r)
+    # ------------------------------------------------------------------------
+    # ELF has no per-symbol "comes from library X" record. The one place a file
+    # ties an undefined symbol to a library is symbol versioning: .gnu.version
+    # gives each .dynsym entry a version index, and .gnu.version_r (Verneed)
+    # says which DT_NEEDED file each required version was found in at link time.
+    versym_off = 0
+    versym_count = 0
+    verneed_off = 0
+    verneed_count = 0
+    verneed_strtab: Any = dynstr_bytes
+    for sh in raw_shdrs:
+        if sh["sh_type"] == SHT_GNU_VERSYM and sh["size"] >= 2 and 0 < sh["slice_offset"] < file_size:
+            versym_off, versym_count = sh["slice_offset"], sh["size"] // 2
+        elif sh["sh_type"] == SHT_GNU_VERNEED and sh["size"] >= 16 and 0 < sh["slice_offset"] < file_size:
+            verneed_off, verneed_count = sh["slice_offset"], sh["sh_info"] or sh["size"] // 16
+            if 0 < sh["sh_link"] < len(raw_shdrs):
+                link_sh = raw_shdrs[sh["sh_link"]]
+                if link_sh["size"] > 0 and link_sh["slice_offset"] < file_size:
+                    verneed_strtab = _StrTable(full_data, link_sh["slice_offset"], min(link_sh["size"], file_size - link_sh["slice_offset"]))
+    if not versym_off and DT_VERSYM in dyn_tags:
+        foff = vm_to_file_off(dyn_tags[DT_VERSYM][0])
+        if foff is not None and 0 < foff < file_size:
+            versym_off, versym_count = foff, (file_size - foff) // 2
+    if not verneed_off and DT_VERNEED in dyn_tags:
+        foff = vm_to_file_off(dyn_tags[DT_VERNEED][0])
+        if foff is not None and 0 < foff < file_size:
+            verneed_off, verneed_count = foff, dyn_tags.get(DT_VERNEEDNUM, [0])[0]
+
+    verneed_by_index: Dict[int, Tuple[str, str]] = {}   # version index -> (file, version name)
+    version_needs: List[Dict[str, Any]] = []
+    if verneed_off:
+        vn_cur = verneed_off
+        for _ in range(min(verneed_count, 256)):
+            runtime.check_deadline()
+            if vn_cur + 16 > file_size:
+                break
+            vn_cnt = buf.u16(vn_cur + 2)
+            vn_file = buf.u32(vn_cur + 4)
+            vn_aux = buf.u32(vn_cur + 8)
+            vn_next = buf.u32(vn_cur + 12)
+            need_file = _read_strtab(verneed_strtab, vn_file)
+            need_versions: List[str] = []
+            aux_cur = vn_cur + vn_aux
+            for _aux in range(min(vn_cnt, 256)):
+                if vn_aux == 0 or aux_cur + 16 > file_size:
+                    break
+                vna_other = buf.u16(aux_cur + 6)
+                vna_name = buf.u32(aux_cur + 8)
+                vna_next = buf.u32(aux_cur + 12)
+                ver_name = _read_strtab(verneed_strtab, vna_name)
+                if need_file and (vna_other & 0x7FFF) >= 2:
+                    verneed_by_index.setdefault(vna_other & 0x7FFF, (need_file, ver_name))
+                if ver_name:
+                    need_versions.append(ver_name)
+                if vna_next == 0:
+                    break
+                aux_cur += vna_next
+            if need_file:
+                version_needs.append({"file": need_file, "versions": need_versions, "abs_offset": vn_cur})
+            if vn_next == 0:
+                break
+            vn_cur += vn_next
+
+    needed_ordinal = {d["name"]: d["index"] + 1 for d in reversed(dylibs)}
+
+    def dynsym_origin(dynsym_index: int) -> Tuple[str, str]:
+        """(library, version) the file records for .dynsym entry `dynsym_index`, or ("", "")."""
+        if not verneed_by_index or not 0 <= dynsym_index < versym_count:
+            return ("", "")
+        pos = versym_off + dynsym_index * 2
+        if pos + 2 > file_size:
+            return ("", "")
+        return verneed_by_index.get(buf.u16(pos) & 0x7FFF, ("", ""))
+
+    # ------------------------------------------------------------------------
     # 5. Parse Symbol Tables (.dynsym and .symtab)
     # ------------------------------------------------------------------------
     symbols: List[Dict[str, Any]] = []
     dynsym_names: List[str] = []
     has_symtab = False
     sym_sections = [sh for sh in raw_shdrs if sh["sh_type"] in (SHT_DYNSYM, SHT_SYMTAB)]
+    sym_limit = ANALYSIS_LIMITS["symbols"]
+    dynsym_name_limit = sym_limit * 4
+    sym_struct = struct.Struct(buf.endian_char + ("IBBHQQ" if is_64 else "IIIBBH"))
 
     for sh in sym_sections:
         if sh["sh_type"] == SHT_SYMTAB:
@@ -1244,29 +1473,26 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
         if 0 < sh["sh_link"] < len(raw_shdrs):
             link_sh = raw_shdrs[sh["sh_link"]]
             if link_sh["slice_offset"] < file_size:
-                strtab_blob = buf.read_bytes(
-                    link_sh["slice_offset"], min(link_sh["size"], file_size - link_sh["slice_offset"])
+                strtab_blob = _StrTable(
+                    full_data, link_sh["slice_offset"], min(link_sh["size"], file_size - link_sh["slice_offset"])
                 )
 
-        max_syms = min(2500, s_sz // ent_sz)
-        for idx in range(max_syms):
+        declared = s_sz // ent_sz
+        budget = sym_limit - len(symbols)
+        if budget <= 0:
+            add_warning(warnings, "symbols_truncated", f"Only the first {sym_limit:,} symbols are shown.", limit=sym_limit)
+            break
+        if declared > budget:
+            add_warning(warnings, "symbols_truncated", f"{sh['sectname']} has {declared:,} entries; only {sym_limit:,} symbols in total are shown.", limit=sym_limit, total=declared)
+        for idx in range(min(declared, budget, dynsym_name_limit)):
+            runtime.check_deadline()
             ent_off = s_off + idx * ent_sz
             if ent_off + ent_sz > file_size:
                 break
             if is_64:
-                st_name = buf.u32(ent_off)
-                st_info = buf.u8(ent_off + 4)
-                st_other = buf.u8(ent_off + 5)
-                st_shndx = buf.u16(ent_off + 6)
-                st_value = buf.u64(ent_off + 8)
-                st_size = buf.u64(ent_off + 16)
+                st_name, st_info, st_other, st_shndx, st_value, st_size = sym_struct.unpack(buf.read_bytes(ent_off, 24))
             else:
-                st_name = buf.u32(ent_off)
-                st_value = buf.u32(ent_off + 4)
-                st_size = buf.u32(ent_off + 8)
-                st_info = buf.u8(ent_off + 12)
-                st_other = buf.u8(ent_off + 13)
-                st_shndx = buf.u16(ent_off + 14)
+                st_name, st_value, st_size, st_info, st_other, st_shndx = sym_struct.unpack(buf.read_bytes(ent_off, 16))
 
             sym_str = _read_strtab(strtab_blob, st_name)
             if sh["sh_type"] == SHT_DYNSYM:
@@ -1290,6 +1516,8 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 sec_name = raw_shdrs[st_shndx]["sectname"] if st_shndx < len(raw_shdrs) else f"sect_{st_shndx}"
 
             target_foff = vm_to_file_off(st_value) if st_value > 0 else None
+            is_dynsym = sh["sh_type"] == SHT_DYNSYM
+            origin_lib, origin_ver = dynsym_origin(idx) if (is_dynsym and st_shndx == 0) else ("", "")
             symbols.append({
                 "index": len(symbols),
                 "name": sym_str or f"anon_{idx}",
@@ -1304,8 +1532,12 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 "n_sect": st_shndx if st_shndx < 255 else 0,
                 "section_name": sec_name,
                 "n_desc": st_other,
-                "library_ordinal": 1 if st_shndx == 0 and dylibs else 0,
-                "library_name": dylibs[0]["name"] if (st_shndx == 0 and dylibs) else (".dynsym" if sh["sh_type"] == SHT_DYNSYM else ".symtab"),
+                # An undefined symbol names a library only through its version requirement
+                # (see 4b); without one the providing library is not recorded in the file.
+                "library_ordinal": needed_ordinal.get(origin_lib, 0),
+                "library_name": origin_lib if st_shndx == 0 else (".dynsym" if is_dynsym else ".symtab"),
+                "library_source": ("verneed" if origin_lib else "unknown") if st_shndx == 0 else "",
+                "version": origin_ver,
                 "n_value": f"0x{st_value:x}",
                 "n_value_int": st_value,
                 "symbol_size": st_size,
@@ -1334,25 +1566,51 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     exports_list: List[Dict[str, Any]] = []
     indirect_symbols: List[Dict[str, Any]] = []
 
+    import_names = set()
+    export_names = set()
+    imp_limit = ANALYSIS_LIMITS["imports"]
+    exp_limit = ANALYSIS_LIMITS["exports"]
+    import_index: Dict[str, int] = {}
     for sym in symbols:
         if sym["type_name"] == "UNDF" and sym["name"]:
-            if len(imports_list) < 500 and not any(imp["name"] == sym["name"] for imp in imports_list):
-                imports_list.append({
-                    "index": len(imports_list),
-                    "name": sym["name"],
-                    "lib_ordinal": 1,
-                    "lib_name": sym["library_name"] or "libc.so.6",
-                    "weak_import": sym["is_weak"],
-                })
+            # .symtab repeats .dynsym's undefined symbols, spelled "name@VERSION" and without
+            # version indices: one import per symbol, keeping the entry that carries the library.
+            base_name = sym["name"].split("@", 1)[0] or sym["name"]
+            if base_name in import_names:
+                known = imports_list[import_index[base_name]] if base_name in import_index else None
+                if known is not None and not known["lib_name"] and sym.get("library_source") == "verneed":
+                    known.update({"lib_name": sym["library_name"], "lib_ordinal": sym["library_ordinal"],
+                                  "lib_source": "verneed", "version": sym.get("version", "")})
+                continue
+            if len(imports_list) >= imp_limit:
+                add_warning(warnings, "imports_truncated", f"Only the first {imp_limit:,} imported symbols are listed.", limit=imp_limit)
+                continue
+            import_names.add(base_name)
+            import_index[base_name] = len(imports_list)
+            imports_list.append({
+                "index": len(imports_list),
+                "name": sym["name"],
+                # 0 / "" = the file does not say which library provides this symbol.
+                "lib_ordinal": sym["library_ordinal"],
+                "lib_name": sym["library_name"],
+                "lib_source": sym.get("library_source") or "unknown",
+                "version": sym.get("version", ""),
+                "weak_import": sym["is_weak"],
+            })
         elif sym["type_name"] == "SECT" and sym["is_external"] and sym["n_value_int"] > 0:
-            if len(exports_list) < 500 and not any(ex["name"] == sym["name"] for ex in exports_list):
-                exports_list.append({
-                    "name": sym["name"],
-                    "vmaddr": sym["n_value"],
-                    "offset": sym["target_abs_offset"] or 0,
-                    "flags": 0,
-                    "flags_decoded": [sym.get("stt_type", "FUNC")],
-                })
+            if sym["name"] in export_names:
+                continue
+            if len(exports_list) >= exp_limit:
+                add_warning(warnings, "exports_truncated", f"Only the first {exp_limit:,} exported symbols are listed.", limit=exp_limit)
+                continue
+            export_names.add(sym["name"])
+            exports_list.append({
+                "name": sym["name"],
+                "vmaddr": sym["n_value"],
+                "offset": sym["target_abs_offset"] or 0,
+                "flags": 0,
+                "flags_decoded": [sym.get("stt_type", "FUNC")],
+            })
 
     rel_sections = [sh for sh in raw_shdrs if sh["sh_type"] in (SHT_RELA, SHT_REL)]
     for rsh in rel_sections:
@@ -1363,8 +1621,13 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
         r_ent = rsh["sh_entsize"] or default_ent
         if r_off <= 0 or r_off >= file_size or r_ent <= 0:
             continue
-        n_rel = min(256, r_sz // r_ent)
-        for idx in range(n_rel):
+        fix_limit = ANALYSIS_LIMITS["fixups_preview"]
+        declared_rel = r_sz // r_ent
+        n_rel = min(256, declared_rel, fix_limit - len(fixups_preview))
+        if declared_rel > n_rel:
+            add_warning(warnings, "relocations_truncated", f"Relocation sections are previewed (up to 256 entries each, {fix_limit:,} in total).", limit=fix_limit)
+        for idx in range(max(0, n_rel)):
+            runtime.check_deadline()
             pos = r_off + idx * r_ent
             if pos + r_ent > file_size:
                 break
@@ -1404,14 +1667,29 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                     "symbol_name": sym_name,
                 })
 
+    # Which relocation record formats the file actually uses: REL (addend stored in the
+    # relocated field), RELA (explicit addend) and/or RELR (packed relative relocations).
+    # This is a property of each relocation section, not of the word size.
+    reloc_kinds: List[str] = []
+    for kind_name, present in (
+        ("REL", any(sh["sh_type"] == SHT_REL for sh in rel_sections) or DT_REL in dyn_tags
+                or (dyn_tags.get(DT_PLTREL, [0])[0] == DT_REL and DT_JMPREL in dyn_tags)),
+        ("RELA", any(sh["sh_type"] == SHT_RELA for sh in rel_sections) or DT_RELA in dyn_tags
+                 or (dyn_tags.get(DT_PLTREL, [0])[0] == DT_RELA and DT_JMPREL in dyn_tags)),
+        ("RELR", any(sh["sh_type"] == SHT_RELR for sh in raw_shdrs) or DT_RELR in dyn_tags),
+    ):
+        if present:
+            reloc_kinds.append(kind_name)
+    reloc_kinds_label = " + ".join(reloc_kinds) if reloc_kinds else "no relocation records"
+
     dyld_info_obj = {
         "has_dyld_info": len(dyn_tags) > 0,
         "has_chained_fixups": len(fixups_preview) > 0,
         "has_exports_trie": len(exports_list) > 0,
         "chained_fixups": {
             "fixups_version": 1,
-            "pointer_format": f"ELF {'RELA' if is_64 else 'REL'} ({arch_short})",
-            "imports_format": "DT_NEEDED + .dynsym",
+            "pointer_format": f"ELF {reloc_kinds_label} ({arch_short})",
+            "imports_format": ".dynsym undefined symbols" + (" + .gnu.version_r (library per versioned symbol)" if verneed_by_index else " (providing library not recorded)"),
             "imports_count": len(imports_list),
             "chains_count": len(rel_sections),
             "segments": [],
@@ -1430,7 +1708,15 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
     # ------------------------------------------------------------------------
     strings_list: List[Dict[str, Any]] = []
     compiler_comments: List[str] = []
+    strings_limit = ANALYSIS_LIMITS["strings"]
+    scan_budget = ANALYSIS_LIMITS["string_scan_bytes"]
     for sh in raw_shdrs:
+        if len(strings_list) >= strings_limit:
+            add_warning(warnings, "strings_truncated", f"Only the first {strings_limit:,} strings are shown.", limit=strings_limit)
+            break
+        if scan_budget <= 0:
+            add_warning(warnings, "strings_scan_budget", "String extraction stopped after scanning its byte budget; later sections were not scanned.", limit=ANALYSIS_LIMITS["string_scan_bytes"])
+            break
         sname = sh["sectname"]
         if (
             sname in (".rodata", ".comment", ".interp")
@@ -1438,39 +1724,32 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             or "rodata" in sname
         ):
             s_off = sh["slice_offset"]
-            s_sz = min(sh["size"], 131072)
+            s_sz = min(sh["size"], 131072, scan_budget)
             if s_off <= 0 or s_off + s_sz > file_size:
                 continue
+            scan_budget -= s_sz
             raw_sec = buf.read_bytes(s_off, s_sz)
-            pos = 0
-            while pos < len(raw_sec) and len(strings_list) < 2000:
-                nul = raw_sec.find(b"\x00", pos)
-                if nul == -1:
-                    chunk = raw_sec[pos:]
-                    next_pos = len(raw_sec)
-                else:
-                    chunk = raw_sec[pos:nul]
-                    next_pos = nul + 1
-                if len(chunk) >= 3:
-                    try:
-                        s_val = chunk.decode("utf-8")
-                        if all(32 <= ord(ch) <= 126 or ch in "\t\n\r" for ch in s_val):
-                            s_vm = sh["vmaddr_int"] + pos if sh["vmaddr_int"] else 0
-                            strings_list.append({
-                                "index": len(strings_list),
-                                "source": sname,
-                                "vmaddr": f"0x{s_vm:x}",
-                                "slice_offset": s_off + pos,
-                                "abs_offset": s_off + pos,
-                                "length": len(s_val),
-                                "encoding": "UTF-8",
-                                "value": s_val,
-                            })
-                            if sname == ".comment":
-                                compiler_comments.append(s_val)
-                    except UnicodeDecodeError:
-                        pass
-                pos = next_pos
+            # NUL-separated runs of printable ASCII (plus tab / newline / CR), at least
+            # 3 bytes long, as before -- matched in C, not one iteration per NUL byte.
+            for m in _CSTRING_RUN_3.finditer(raw_sec):
+                if len(strings_list) >= strings_limit:
+                    break
+                runtime.check_deadline()
+                pos = m.start()
+                s_val = m.group(0).decode("ascii")
+                s_vm = sh["vmaddr_int"] + pos if sh["vmaddr_int"] else 0
+                strings_list.append({
+                    "index": len(strings_list),
+                    "source": sname,
+                    "vmaddr": f"0x{s_vm:x}",
+                    "slice_offset": s_off + pos,
+                    "abs_offset": s_off + pos,
+                    "length": len(s_val),
+                    "encoding": "UTF-8",
+                    "value": s_val,
+                })
+                if sname == ".comment" and len(compiler_comments) < 32:
+                    compiler_comments.append(s_val)
 
     # Function starts from FUNC symbols
     function_starts = [
@@ -1564,32 +1843,26 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 "flags_decoded": [sect["section_type"]] + sect["attributes_decoded"],
             })
 
+    # ELF has no in-format code signature. A build ID identifies a build and the
+    # GNU property note declares CPU features; neither signs anything, so they are
+    # reported where they belong (overview.uuid, elf_metadata.build_id / notes /
+    # gnu_property_entries and the "cfi_cet_pac" / "build_id_symbols" checks) and
+    # this record says, truthfully, that no signature is present. The frontend shows
+    # the ELF notes table in the signature node when `present` is false.
     code_sig_detail = {
-        "present": bool(build_id_hex or gnu_properties),
+        "present": False,
+        "kind": "none",
+        "note": "ELF defines no embedded signature. The build ID and GNU properties are in elf_metadata.",
         "superblob_region": None,
-        "magic": "NT_GNU_BUILD_ID" if build_id_hex else None,
-        "length": len(build_id_hex) // 2,
-        "blob_count": (1 if build_id_hex else 0) + (1 if gnu_properties else 0),
+        "magic": None,
+        "length": 0,
+        "blob_count": 0,
         "fields": [],
         "blobs": [],
-        "code_directory": {
-            "version": 1,
-            "flags_int": 0,
-            "flags_decoded": gnu_properties,
-            "hash_type": "GNU Build-ID (SHA-1/MD5)",
-            "identifier": osabi_name,
-            "team_id": abi_minos_str or "ELF Note",
-            "cdhash": build_id_hex,
-            "cdhash_verified": bool(build_id_hex),
-            "page_size": 4096,
-            "n_special_slots": len(gnu_properties),
-            "n_code_slots": len(segments),
-            "special_slots": [],
-            "code_slots_preview": [],
-        } if build_id_hex else None,
+        "code_directory": None,
         "entitlements_xml": "",
-        "entitlements_dict": {prop: True for prop in gnu_properties},
-        "entitlements_entries": [{"key": prop, "value": True, "risk": "LOW"} for prop in gnu_properties],
+        "entitlements_dict": {},
+        "entitlements_entries": [],
         "cms_signature": {"present": False, "is_adhoc": False, "size": 0, "certificates": []},
     }
 
@@ -1656,7 +1929,11 @@ def parse_elf_slice(full_data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             "build_id": build_id_hex,
             "abi_tag": abi_minos_str,
             "gnu_properties": gnu_properties,
+            "gnu_property_entries": gnu_property_entries,
+            "version_needs": version_needs,
             "compiler_comments": compiler_comments,
             "notes": notes_list,
         },
+        "warnings": warnings,
+        "truncated": bool(warnings),
     }

@@ -1,0 +1,107 @@
+# systemd unit for BinaryStudio in public mode, behind a TLS reverse proxy on
+# the same host (deploy/Caddyfile or deploy/nginx.conf).
+#
+#   sudo mkdir -p /opt/binarystudio/tools
+#   sudo cp -r binary_viewer.py macho_viewer.py backend static fixtures /opt/binarystudio/
+#   sudo cp tools/site_pages.py /opt/binarystudio/tools/
+#
+# tools/site_pages.py is the site layer the server loads at start (learning pages,
+# robots.txt, sitemap and the ads policy). Without it the server still runs, but
+# serves no learning pages and forces ads off. Nothing else under tools/ is needed
+# at run time, and neither are tests/, docs/ or dist/.
+#   sudo chown -R root:root /opt/binarystudio && sudo chmod -R a+rX,go-w /opt/binarystudio
+#   sudo cp deploy/binarystudio.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now binarystudio
+#
+# Review the hardening with:  systemd-analyze security binarystudio
+
+[Unit]
+Description=BinaryStudio binary analysis service (public mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/binarystudio
+ExecStart=/usr/bin/python3 /opt/binarystudio/binary_viewer.py --public --host 127.0.0.1 --port 8421
+
+# Site-specific settings. `binary_viewer.py --help` lists every variable.
+Environment=BINARYSTUDIO_ALLOWED_HOSTS=binarystudio.example.com
+Environment=BINARYSTUDIO_TRUST_PROXY=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+# EnvironmentFile=-/etc/binarystudio.env
+
+# Uploads are analysed in worker processes (children of this service) that the
+# server kills when they overrun their time budget, so a stuck analysis no
+# longer costs the service. Restart=always remains for everything else, and for
+# the last resort that only exists when workers are switched off
+# (BINARYSTUDIO_PARSE_WORKERS=0): the server then exits on an analysis it cannot
+# interrupt (BINARYSTUDIO_HARD_PARSE_TIMEOUT) and must come back by itself.
+Restart=always
+RestartSec=2
+# If the kernel has to kill for memory it takes an analysis worker (they mark
+# themselves as the preferred victim); only that upload fails and the server
+# starts another worker. Without this line systemd would stop the whole unit.
+OOMPolicy=continue
+
+# --- Identity: a throwaway user that owns nothing -----------------------------
+DynamicUser=yes
+UMask=0077
+
+# --- Filesystem: everything read-only, most of it invisible --------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# --- Privileges: none, and no way to gain any ----------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+
+# --- Kernel surface: TCP sockets and ordinary system calls only ----------------
+# (The server talks to its analysis workers over pipes: no AF_UNIX needed.)
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Each analysis worker lowers its own limits at start (address space:
+# BINARYSTUDIO_PARSE_WORKER_MEMORY_MB, CPU seconds per analysis, no core files).
+# Those two calls are in @resources, removed above, so they are given back. If
+# they are refused anyway the workers still run, bounded by the server's
+# deadline and by MemoryMax below, just without their own kernel limits.
+SystemCallFilter=setrlimit prlimit64
+SystemCallErrorNumber=EPERM
+
+# --- Resources -------------------------------------------------------------------
+# The server: document cache (512 MiB estimate) + uploads in flight (128 MiB).
+# Its four analysis workers: about 35 MiB each when idle, 200 MiB while analysing
+# a file that yields a 20 MiB document, never more than their own 1 GiB limit.
+# Past MemoryMax the kernel kills a worker first (see OOMPolicy above).
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=512
+LimitNOFILE=4096
+
+# Structured JSON lines on stderr go to the journal:  journalctl -u binarystudio -o cat
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binarystudio
+
+[Install]
+WantedBy=multi-user.target

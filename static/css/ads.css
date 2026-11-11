@@ -1,0 +1,77 @@
+/* ==========================================================================
+   BinaryStudio — ad unit (static/js/ads.js, and house units rendered into content pages).
+   Loaded only when ads are enabled. Uses the colour tokens that both static/styles.css (the app)
+   and static/css/site.css (content pages) define. Nothing here moves: no transitions, no
+   animation, no position: fixed / sticky. A unit is clipped to the height its slot reserved.
+   ========================================================================== */
+
+.bs-ad {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  font: 13px/1.45 var(--font-sans);
+  color: var(--text-secondary);
+  overflow: hidden;
+}
+
+.bs-ad-label {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.bs-ad-label a { color: inherit; }
+
+.bs-ad-link {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-height: 0;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+.bs-ad-link:hover .bs-ad-title { text-decoration: underline; }
+
+.bs-ad-img {
+  flex: none;
+  /* The width/height attributes reserve the box before the image arrives; object-fit keeps the
+     proportions if a cap below is smaller. Never width/height: auto (that waits for the image). */
+  max-width: 120px;
+  max-height: 90px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.bs-ad-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.bs-ad-title { color: var(--text-bright); font-weight: 600; }
+.bs-ad-body { color: var(--text-secondary); }
+.bs-ad-cta { color: var(--link, var(--rx-fg)); }
+
+.bs-ad-frame { flex: 1; width: 100%; min-height: 0; border: 0; display: block; background: transparent; }
+
+/* Consent prompt: two equal buttons, no pre-selection, no colour that favours either. */
+.bs-ad-consent { justify-content: center; }
+.bs-ad-consent p { margin: 0; }
+.bs-ad-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.bs-ad-actions button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.bs-ad-actions button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.bs-ad-reset { font: inherit; font-size: 12px; background: none; border: none; padding: 0; color: var(--text-muted); text-decoration: underline; cursor: pointer; }
+
+/* In the app: the footer strip under the status bar (BS.ui.slot('footer')). Compact, one line of copy. */
+.ext-slot .bs-ad { flex-direction: row; align-items: center; gap: 12px; border: none; border-radius: 0; padding: 6px 14px; background: transparent; }
+.ext-slot .bs-ad-img { max-height: 60px; max-width: 80px; width: 80px; height: 60px; }
+.ext-slot .bs-ad-copy { flex-direction: row; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.ext-slot .bs-ad-consent { flex-direction: row; justify-content: flex-start; }

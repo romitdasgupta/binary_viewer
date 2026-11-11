@@ -1,0 +1,67 @@
+# BinaryStudio behind Caddy (automatic HTTPS).
+#
+#   cd deploy
+#   BINARYSTUDIO_DOMAIN=binarystudio.example.com docker compose up -d --build
+#
+# Only Caddy is published. The app container has no published port, a
+# read-only root filesystem, no capabilities and hard memory / process limits.
+# Uploads are analysed in worker processes inside the app container; one that
+# overruns its time or memory budget is killed and replaced by the server, and
+# only that upload fails. If the container itself ever exits it is restarted,
+# and browsers transparently re-upload on the resulting HTTP 410.
+#
+# Every limit that matters is enforced by the app itself (see the list at the
+# top of the Caddyfile); Caddy adds TLS and nothing the app depends on.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 512
+    environment:
+      # The public name(s) of the site. Requests for any other Host get 403.
+      BINARYSTUDIO_ALLOWED_HOSTS: "${BINARYSTUDIO_DOMAIN:?set BINARYSTUDIO_DOMAIN to your domain}"
+      # Caddy sets X-Forwarded-For; this makes rate limits apply per visitor
+      # rather than to Caddy as a whole. Safe only because nothing else can
+      # reach this container.
+      BINARYSTUDIO_TRUST_PROXY: "1"
+      # Everything else has a public-mode default; see `binary_viewer.py --help`.
+      # BINARYSTUDIO_MAX_UPLOAD_MB: "32"
+      # BINARYSTUDIO_CACHE_MAX_MB: "512"
+    expose:
+      - "8421"
+    networks: [internal]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      BINARYSTUDIO_DOMAIN: "${BINARYSTUDIO_DOMAIN:?set BINARYSTUDIO_DOMAIN to your domain}"
+      BINARYSTUDIO_UPSTREAM: "app:8421"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [internal]
+
+networks:
+  internal:
+
+volumes:
+  caddy_data:
+  caddy_config:

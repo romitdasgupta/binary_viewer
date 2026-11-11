@@ -2,16 +2,23 @@
 """
 BinaryStudio — Multi-Format Binary Inspector, Semantic Intelligence & Systems Learning Suite.
 Supports Apple Mach-O (32/64 & Universal Fat), Linux ELF32/64, and Windows PE32/PE32+ Binaries.
-Unified CLI Inspector & Desktop Web IDE Server Launcher.
+Unified CLI Inspector & Web IDE Server Launcher.
+
+  python3 binary_viewer.py                       local web UI on http://127.0.0.1:8421
+  python3 binary_viewer.py --cli FILE [--json]   inspect a file in the terminal
+  python3 binary_viewer.py --public ...          host it for other people (see --help)
 """
 
 import argparse
 import json
 import os
+import signal
 import sys
 import webbrowser
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
+from backend import runtime
+from backend.api import LOG, is_loopback_host
 from backend.fixtures import ensure_fixtures
 from backend.server import create_server
 from backend.service import AnalysisService
@@ -137,102 +144,288 @@ def _print_cli_summary(
     print("=" * 78)
 
 
-def main() -> int:
+def _env_help() -> str:
+    lines = [
+        "environment variables (a command-line flag wins over its variable):",
+    ]
+    for name, _attr, _convert, text in runtime.ENV_VARS:
+        lines.append(f"  {name}")
+        lines.append(f"      {text}")
+    lines += [
+        "",
+        "modes:",
+        "  local (default)  One trusted user on this machine. Can open any file this user can",
+        "                   read and may run objdump / c++filt. Listens on loopback only.",
+        "  public (--public) For hosting on a network. No access to server files, no external",
+        "                   tools, uploads addressed by unguessable ids and dropped when idle,",
+        "                   rate limits and bounded memory. Serves plain HTTP: put a TLS reverse",
+        "                   proxy in front, name your domain with --allowed-host and, when the",
+        "                   proxy sets X-Forwarded-For, pass --trust-proxy. See deploy/.",
+    ]
+    return "\n".join(lines)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="BinaryStudio — Multi-Format Binary Inspector & Disassembler (Mach-O, ELF32/64, Windows PE32/PE32+)"
+        description="BinaryStudio — Multi-Format Binary Inspector & Disassembler (Mach-O, ELF32/64, Windows PE32/PE32+)",
+        epilog=_env_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
+    cli = parser.add_argument_group("command-line inspection")
+    cli.add_argument(
         "--cli",
         metavar="FILE",
         help="Run in headless CLI inspection mode on the given Mach-O, ELF32/64, or Windows PE binary",
     )
-    parser.add_argument(
+    cli.add_argument(
         "--json",
         action="store_true",
         help="Output canonical BinaryDocument JSON in --cli mode",
     )
-    parser.add_argument(
+    cli.add_argument(
         "--slice",
         default="0",
         help="Select architecture slice by index (0, 1) or arch name (arm64, arm64e, x86_64)",
     )
-    parser.add_argument(
+    cli.add_argument(
         "--disasm",
         nargs="?",
         const="entry",
         default=None,
         help="Disassemble instructions at entry point or specified VMAddr in --cli mode",
     )
-    parser.add_argument(
+    cli.add_argument(
         "--translate",
         default=None,
         help="Translate a VMAddr or File Offset in --cli mode",
     )
-    parser.add_argument(
+
+    web = parser.add_argument_group("web server")
+    web.add_argument(
         "--host",
-        default="127.0.0.1",
+        default=None,
         help="HTTP server bind address (default: 127.0.0.1)",
     )
-    parser.add_argument(
+    web.add_argument(
         "--port",
         type=int,
-        default=8421,
-        help="HTTP server port (default: 8421)",
+        default=None,
+        help="HTTP server port (default: 8421; 0 picks a free port)",
     )
-    parser.add_argument(
+    web.add_argument(
         "--file",
         default=None,
-        help="Preload a specific Mach-O, ELF, or PE binary when starting the web server",
+        help="Preload a specific Mach-O, ELF, or PE binary when starting the web server (local mode)",
     )
-    parser.add_argument(
+    web.add_argument(
         "--open",
         action="store_true",
         help="Automatically open BinaryStudio Web IDE in the default browser",
     )
+    web.add_argument(
+        "--debug",
+        action="store_true",
+        help="Local mode only: include Python tracebacks in error responses",
+    )
+    web.add_argument(
+        "--access-log",
+        action="store_true",
+        default=None,
+        help="Log one line per request to stderr (always on with --public)",
+    )
+    web.add_argument(
+        "--i-know-this-is-unsafe",
+        dest="unsafe_bind",
+        action="store_true",
+        help="Allow local mode on a non-loopback --host. Everyone who can reach the port can then "
+             "read every file you can. You almost certainly want --public instead",
+    )
 
-    args = parser.parse_args()
+    public = parser.add_argument_group("public hosting")
+    public.add_argument(
+        "--public",
+        action="store_true",
+        help="Run in public mode: safe to expose behind a TLS reverse proxy (see 'modes' below)",
+    )
+    public.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="A Host name this server answers to, e.g. binarystudio.example.com; repeat for more. "
+             "A leading dot matches subdomains; '*' accepts any. Loopback names are always accepted",
+    )
+    public.add_argument(
+        "--trust-proxy",
+        action="store_true",
+        default=None,
+        help="Take each client's address from the last X-Forwarded-For entry. Only for use behind "
+             "a reverse proxy that sets it; the port must not be reachable any other way",
+    )
+    public.add_argument(
+        "--max-upload-mb",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Largest accepted upload in MiB (default: 32 public, 256 local)",
+    )
+    public.add_argument(
+        "--csp-extra",
+        default=None,
+        metavar="POLICY",
+        help="Sources to add to the page Content-Security-Policy, e.g. "
+             "\"script-src 'wasm-unsafe-eval'; frame-src https://ads.example\"",
+    )
+    return parser
+
+
+def _run_cli(args: argparse.Namespace, workspace_root: str) -> int:
+    ensure_fixtures(workspace_root)
+    service = AnalysisService(workspace_root, runtime.RuntimeConfig("local"))
+    try:
+        doc = service.load_file(args.cli)
+    except (runtime.ApiError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    slice_idx = _resolve_slice_index(doc, args.slice)
+
+    if args.json:
+        if args.translate:
+            out = service.translate_address(slice_index=slice_idx, query=args.translate)
+        elif args.disasm is not None:
+            vm_arg = None if args.disasm in ("", "entry", "default") else args.disasm
+            out = service.disassemble(slice_index=slice_idx, vmaddr=vm_arg, count=64)
+        else:
+            out = doc
+        print(json.dumps(out, indent=2))
+    else:
+        _print_cli_summary(
+            service,
+            doc,
+            slice_idx=slice_idx,
+            disasm_addr=args.disasm,
+            translate_addr=args.translate,
+        )
+    return 0
+
+
+def _display_url(host: str, port: int) -> str:
+    shown = "127.0.0.1" if host in ("0.0.0.0", "") else ("[::1]" if host == "::" else host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}"
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
     workspace_root = os.path.dirname(os.path.abspath(__file__))
 
     if args.cli:
-        ensure_fixtures(workspace_root)
-        service = AnalysisService(workspace_root)
-        doc = service.load_file(args.cli)
-        slice_idx = _resolve_slice_index(doc, args.slice)
-
-        if args.json:
-            if args.translate:
-                out = service.translate_address(slice_index=slice_idx, query=args.translate)
-            elif args.disasm is not None:
-                vm_arg = None if args.disasm in ("", "entry", "default") else args.disasm
-                out = service.disassemble(slice_index=slice_idx, vmaddr=vm_arg, count=64)
-            else:
-                out = doc
-            print(json.dumps(out, indent=2))
-        else:
-            _print_cli_summary(
-                service,
-                doc,
-                slice_idx=slice_idx,
-                disasm_addr=args.disasm,
-                translate_addr=args.translate,
-            )
-        return 0
+        return _run_cli(args, workspace_root)
 
     # Web IDE Server Mode
-    server = create_server(
-        workspace_root=workspace_root,
-        host=args.host,
-        port=args.port,
-        initial_file=args.file,
-    )
-    url = f"http://{args.host}:{args.port}"
-    print(f"BinaryStudio Server listening on {url}")
+    env = os.environ
+    env_mode = (env.get("BINARYSTUDIO_MODE") or "local").strip().lower()
+    if env_mode not in ("local", "public"):
+        parser.error(f"BINARYSTUDIO_MODE must be 'local' or 'public', not {env_mode!r}")
+    mode = "public" if args.public else env_mode
+
+    overrides: Dict[str, Any] = {}
+    if args.max_upload_mb is not None:
+        if args.max_upload_mb <= 0:
+            parser.error("--max-upload-mb must be greater than zero")
+        overrides["max_upload_bytes"] = int(args.max_upload_mb * 1024 * 1024)
+    if args.trust_proxy:
+        overrides["trust_proxy_headers"] = True
+    if args.allowed_host:
+        overrides["allowed_hosts"] = list(args.allowed_host)
+    if args.access_log:
+        overrides["access_log"] = True
+    if args.csp_extra is not None:
+        overrides["csp_extra"] = args.csp_extra
+    if args.unsafe_bind:
+        overrides["allow_unsafe_bind"] = True
+    if args.debug:
+        if mode != "local":
+            parser.error("--debug is only available in local mode")
+        overrides["debug_errors"] = True
+    if args.file and mode != "local":
+        parser.error("--file is only available in local mode; public mode never opens server files")
+
+    try:
+        config = runtime.RuntimeConfig.from_env(mode, dict(env), **overrides)
+    except ValueError as exc:
+        parser.error(str(exc))
+    runtime.set_config(config)
+
+    host = args.host or (env.get("BINARYSTUDIO_HOST") or "").strip() or "127.0.0.1"
+    port = args.port
+    if port is None:
+        try:
+            port = int(env.get("BINARYSTUDIO_PORT") or 8421)
+        except ValueError:
+            parser.error("BINARYSTUDIO_PORT must be an integer")
+    if not (0 <= port <= 65535):
+        parser.error("--port must be between 0 and 65535")
+
+    try:
+        server = create_server(
+            workspace_root=workspace_root,
+            host=host,
+            port=port,
+            initial_file=args.file,
+            config=config,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: cannot listen on {host}:{port}: {exc}", file=sys.stderr)
+        return 1
+
+    port = server.server_address[1]
+    url = _display_url(host, port)
+    print(f"BinaryStudio Server listening on {url}", flush=True)
+    if config.access_log:
+        LOG.write(
+            "info", "startup", mode=config.mode, host=host, port=port,
+            allowed_hosts=server.app.allowed_hosts, trust_proxy=config.trust_proxy_headers,
+            max_upload_bytes=config.max_upload_bytes, rate_limit_per_minute=config.rate_limit_per_minute,
+            upload_rate_limit_per_minute=config.upload_rate_limit_per_minute,
+            max_concurrent_parses=config.max_concurrent_parses, doc_ttl_seconds=config.doc_ttl_seconds,
+            cache_max_docs=config.cache_max_docs, cache_max_bytes=config.cache_max_bytes,
+            parse_workers=config.parse_worker_count(), parse_worker_memory_bytes=config.parse_worker_memory_bytes,
+        )
+    # Analyses run in worker processes when configured (the default with --public);
+    # start them now rather than on the first upload.
+    server.prewarm_workers()
+    if config.mode == "public":
+        if not config.allowed_hosts:
+            LOG.write("warn", "config", message="No --allowed-host given: only loopback Host names are "
+                      "accepted, so requests for your domain will get 403 until you add it.")
+        if not is_loopback_host(host) and not config.trust_proxy_headers:
+            LOG.write("warn", "config", message="Listening on a non-loopback address without --trust-proxy: "
+                      "this server speaks plain HTTP. Put a TLS reverse proxy in front (see deploy/).")
+    elif not is_loopback_host(host):
+        LOG.write("warn", "config", message="LOCAL MODE ON A NETWORK ADDRESS: anyone who can reach this "
+                  "port can read any file this user can read.")
+
+    def _terminate(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except (ValueError, OSError, AttributeError):
+        pass
+
     if args.open:
         webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down BinaryStudio Server.")
+    finally:
         server.server_close()
     return 0
 

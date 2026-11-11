@@ -3,12 +3,16 @@ LC_CODE_SIGNATURE SuperBlob, CodeDirectory Live Hash Verifier, XML & ASN.1 DER E
 and CMS/PKCS#7 Certificate Chain Extractor.
 """
 
+import datetime
 import hashlib
 import plistlib
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .buffer import BinaryBuffer, make_region
+from . import runtime
+from .buffer import BinaryBuffer, add_warning, make_region
 from .constants import (
+    ANALYSIS_LIMITS,
     CS_FLAGS,
     CS_HASHTYPES,
     CS_MAGIC_NAMES,
@@ -141,8 +145,11 @@ def _read_asn1_length(data: bytes, pos: int) -> Tuple[int, int]:
     return length, pos + num_bytes
 
 
-def _parse_der_entitlements_node(data: bytes, pos: int, end: int) -> Tuple[Any, int]:
+def _parse_der_entitlements_node(data: bytes, pos: int, end: int, depth: int = 0) -> Tuple[Any, int]:
     if pos >= end or pos >= len(data):
+        return None, end
+    if depth > ANALYSIS_LIMITS["der_depth"]:
+        # Too deeply nested to be a real entitlements blob; stop descending.
         return None, end
     tag = data[pos]
     pos += 1
@@ -154,6 +161,10 @@ def _parse_der_entitlements_node(data: bytes, pos: int, end: int) -> Tuple[Any, 
     if tag == 0x01:  # BOOLEAN
         return (bool(content[0]) if content else False), content_end
     elif tag == 0x02:  # INTEGER
+        if len(content) > 8:
+            # Not a plausible entitlement value; a multi-KB integer would also be
+            # quadratic to render as decimal.
+            return content[:64].hex(), content_end
         return int.from_bytes(content, "big", signed=True), content_end
     elif tag in (0x0C, 0x13, 0x16, 0x1E):  # UTF8String, PrintableString, IA5String
         return content.decode("utf-8", errors="replace"), content_end
@@ -163,7 +174,8 @@ def _parse_der_entitlements_node(data: bytes, pos: int, end: int) -> Tuple[Any, 
         items = []
         sub_pos = pos
         while sub_pos < content_end:
-            val, next_pos = _parse_der_entitlements_node(data, sub_pos, content_end)
+            runtime.check_deadline()
+            val, next_pos = _parse_der_entitlements_node(data, sub_pos, content_end, depth + 1)
             if next_pos <= sub_pos:
                 break
             items.append(val)
@@ -180,6 +192,126 @@ def _parse_der_entitlements_node(data: bytes, pos: int, end: int) -> Tuple[Any, 
         return items, content_end
 
     return content.hex(), content_end
+
+
+def _json_safe(value: Any) -> Tuple[Any, bool]:
+    """
+    Converts a decoded plist / DER value into JSON-safe data (bytes -> hex,
+    datetime -> ISO string, tuples -> lists), bounded in depth and node count.
+    Iterative, so hostile nesting cannot hit the recursion limit (or overflow
+    the much smaller WASM stack). Returns (value, was_truncated).
+    """
+    max_depth = ANALYSIS_LIMITS["plist_depth"]
+    budget = [ANALYSIS_LIMITS["plist_nodes"]]
+    truncated = [False]
+
+    def leaf(v: Any) -> Any:
+        if isinstance(v, bool) or v is None:
+            return v
+        if isinstance(v, int):
+            if -(1 << 63) <= v < (1 << 64):
+                return v
+            truncated[0] = True
+            return f"0x{v & ((1 << 256) - 1):x}"[:80]
+        if isinstance(v, float):
+            return v if v == v and v not in (float("inf"), float("-inf")) else str(v)
+        if isinstance(v, (bytes, bytearray)):
+            return bytes(v[:4096]).hex()
+        if isinstance(v, (datetime.datetime, datetime.date)):
+            return v.isoformat()
+        if isinstance(v, str):
+            return v
+        return str(v)[:4096]
+
+    root_holder: List[Any] = [None]
+    # (source, depth, container, key_or_index)
+    stack: List[Tuple[Any, int, Any, Any]] = [(value, 0, root_holder, 0)]
+    while stack:
+        src, depth, parent, key = stack.pop()
+        budget[0] -= 1
+        if budget[0] < 0:
+            truncated[0] = True
+            parent[key] = None
+            continue
+        if isinstance(src, dict):
+            if depth >= max_depth:
+                truncated[0] = True
+                parent[key] = {}
+                continue
+            out: Dict[str, Any] = {}
+            parent[key] = out
+            for k, v in src.items():
+                ks = k if isinstance(k, str) else str(k)
+                out[ks] = None
+                stack.append((v, depth + 1, out, ks))
+        elif isinstance(src, (list, tuple)):
+            if depth >= max_depth:
+                truncated[0] = True
+                parent[key] = []
+                continue
+            out_list: List[Any] = [None] * len(src)
+            parent[key] = out_list
+            for i, v in enumerate(src):
+                stack.append((v, depth + 1, out_list, i))
+        else:
+            parent[key] = leaf(src)
+    return root_holder[0], truncated[0]
+
+
+_HUGE_PLIST_INTEGER = re.compile(rb"<integer>\s*[-+]?\d{40}")
+_PLIST_CONTAINER_TAG = re.compile(rb"<(/?)(?:array|dict)\s*(/?)>")
+# plistlib builds arbitrarily deep nesting iteratively, but freeing a container nested a few
+# thousand levels deep recurses in C. Under Pyodide (WASM) that overflows the JS stack and kills
+# the interpreter (measured: fatal at 5000 levels, fine at 4500, Pyodide 314.0.7), so refuse
+# deep documents before building them. Real entitlements nest a handful of levels.
+_MAX_PLIST_PARSE_DEPTH = 256
+
+
+def _plist_too_deep(xml_bytes: bytes, limit: int = _MAX_PLIST_PARSE_DEPTH) -> bool:
+    depth = 0
+    for m in _PLIST_CONTAINER_TAG.finditer(xml_bytes):
+        if m.group(2):  # <array/>, <dict/>
+            continue
+        depth += -1 if m.group(1) else 1
+        if depth > limit:
+            return True
+    return False
+
+
+def _load_entitlements_plist(xml_bytes: bytes) -> Dict[str, Any]:
+    """XML plist only (entitlements are XML); binary plists are not attempted."""
+    head = xml_bytes[:64].lstrip()
+    if not (head.startswith(b"<?xml") or head.startswith(b"<plist") or head.startswith(b"<!DOCTYPE")):
+        return {}
+    if _HUGE_PLIST_INTEGER.search(xml_bytes):
+        # Decimal -> int conversion is quadratic in CPython 3.9; no real
+        # entitlement holds a 40-digit integer.
+        return {}
+    if _plist_too_deep(xml_bytes):
+        return {}
+    try:
+        # plistlib refuses XML entity declarations, so entity-expansion bombs fail here.
+        parsed = plistlib.loads(xml_bytes)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _entitlements_decodable(payload: bytes, warnings: List[Dict[str, Any]]) -> bool:
+    """Whether an entitlements blob (XML or DER) may be decoded: it must be within
+    the per-blob limit, and the file as a whole within its entitlement budget.
+    Decoding costs up to half a second per megabyte and cannot be interrupted;
+    real entitlements are a few kilobytes."""
+    size = len(payload)
+    limit = ANALYSIS_LIMITS["entitlements_bytes"]
+    if size > limit:
+        add_warning(warnings, "entitlements_too_large", f"A {size:,}-byte entitlements blob exceeds the {limit:,}-byte analysis limit and was not decoded.", limit=limit)
+        return False
+    budget = ANALYSIS_LIMITS["entitlements_file_bytes"]
+    if not runtime.spend_budget("entitlements_file_bytes", size, budget):
+        add_warning(warnings, "entitlements_budget_exceeded", f"This file holds more than {budget:,} bytes of entitlements across its slices; the remaining blobs were not decoded.", limit=budget)
+        return False
+    return True
 
 
 def decode_der_entitlements(der_payload: bytes) -> Dict[str, Any]:
@@ -209,7 +341,13 @@ OID_ORG_UNIT_NAME = b"\x06\x03\x55\x04\x0b"      # 2.5.4.11 (OU)
 def _extract_oid_strings(der_bytes: bytes, oid_pattern: bytes) -> List[str]:
     results: List[str] = []
     start = 0
-    while True:
+    limit = ANALYSIS_LIMITS["cert_names"]
+    # A blob can repeat the OID every few bytes without ever following it with a
+    # string, so the occurrences examined are bounded too, not only the names kept.
+    candidates = ANALYSIS_LIMITS["cert_name_candidates"]
+    while len(results) < limit and candidates > 0:
+        candidates -= 1
+        runtime.check_deadline()
         idx = der_bytes.find(oid_pattern, start)
         if idx == -1:
             break
@@ -238,6 +376,7 @@ def parse_cms_certificates(cms_bytes: bytes) -> List[Dict[str, str]]:
     """
     if not cms_bytes or len(cms_bytes) < 32:
         return []
+    cms_bytes = cms_bytes[: ANALYSIS_LIMITS["cms_bytes"]]
     cns = _extract_oid_strings(cms_bytes, OID_COMMON_NAME)
     orgs = _extract_oid_strings(cms_bytes, OID_ORG_NAME)
 
@@ -247,7 +386,10 @@ def parse_cms_certificates(cms_bytes: bytes) -> List[Dict[str, str]]:
         for i in range(0, len(cns) - 1, 2):
             issuer_cn = cns[i]
             subject_cn = cns[i + 1]
-            org = orgs[i // 2] if (i // 2) < len(orgs) else (orgs[0] if orgs else "Apple Inc.")
+            if len(orgs) == len(cns):
+                org = orgs[i + 1]  # names are aligned: the subject's O
+            else:
+                org = orgs[i // 2] if (i // 2) < len(orgs) else (orgs[0] if orgs else "Apple Inc.")
             # Avoid duplicate cert entries
             if not any(c["subject_cn"] == subject_cn and c["issuer_cn"] == issuer_cn for c in certs):
                 certs.append({
@@ -261,20 +403,48 @@ def parse_cms_certificates(cms_bytes: bytes) -> List[Dict[str, str]]:
             "issuer_cn": cns[0],
             "org": orgs[0] if orgs else "",
         })
-    return certs
+    return _order_chain(certs)
+
+
+def _order_chain(certs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """
+    CMS stores certificates in no particular order (Apple's are intermediate,
+    root, leaf). Return them leaf first, then each issuer, the way `codesign -dv`
+    lists Authority= lines, so certs[0] is the actual signer.
+    """
+    if len(certs) < 2:
+        return certs
+    issuers = {c["issuer_cn"] for c in certs if c["issuer_cn"] != c["subject_cn"]}
+    leaves = [c for c in certs if c["subject_cn"] not in issuers]
+    if not leaves:
+        return certs
+    ordered: List[Dict[str, str]] = []
+    current: Optional[Dict[str, str]] = leaves[0]
+    while current is not None and current not in ordered:
+        ordered.append(current)
+        if current["issuer_cn"] == current["subject_cn"]:
+            break
+        current = next((c for c in certs if c["subject_cn"] == current["issuer_cn"] and c not in ordered), None)
+    ordered.extend(c for c in certs if c not in ordered)
+    return ordered
 
 
 # ============================================================================
 # Main LC_CODE_SIGNATURE Parser
 # ============================================================================
 def parse_code_signature(
-    slice_buf: BinaryBuffer, dataoff: int, datasize: int
+    slice_buf: BinaryBuffer, dataoff: int, datasize: int,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Parses the embedded CS_SuperBlob at `dataoff` (relative to slice_buf) of length `datasize`.
     All Code Signature structures are Big-Endian (`>`).
     """
+    if warnings is None:
+        warnings = []
     if datasize < 8 or dataoff + 8 > slice_buf.slice_size:
+        if datasize > 0:
+            add_warning(warnings, "code_signature_out_of_range", "LC_CODE_SIGNATURE points outside the file; signature not shown.")
         return {
             "present": False,
             "superblob_region": None,
@@ -342,8 +512,21 @@ def parse_code_signature(
             f"{count} sub-blobs",
             "Number of CS_BlobIndex entries in SuperBlob",
         )
-        max_count = min(count, 64)
+        max_count = min(count, ANALYSIS_LIMITS["cs_blobs"])
+        if count > max_count:
+            add_warning(warnings, "cs_blobs_truncated", f"SuperBlob declares {count:,} sub-blobs; only the first {max_count} are read.", limit=max_count, total=count)
+        blob_limit = ANALYSIS_LIMITS["cs_blob_bytes"]
+        # Index entries are free to name the same sub-blob again and again (64 entries
+        # that all point at one megabyte of plist used to cost 64 plist parses, per
+        # slice). Each distinct (offset, length) is therefore read once and decoded
+        # once per interpretation, and what is read counts against a budget for this
+        # signature and one for the whole file (all slices; see runtime.work_budgets).
+        read_blobs: Dict[Tuple[int, int], bytes] = {}
+        decoded_once: set = set()
+        signature_budget = ANALYSIS_LIMITS["cs_signature_bytes"]
+        budget_warned = False
         for i in range(max_count):
+            runtime.check_deadline()
             idx_off = dataoff + 12 + i * 8
             if idx_off + 8 > dataoff + datasize:
                 break
@@ -383,8 +566,32 @@ def parse_code_signature(
                 b_magic = cs_buf.u32(blob_slice_off, ">")
                 b_len = cs_buf.u32(blob_slice_off + 4, ">")
                 b_magic_name = CS_MAGIC_NAMES.get(b_magic, f"0x{b_magic:08x}")
-                raw_blob = cs_buf.read_bytes(blob_slice_off, b_len)
-                slot_raw_blobs[slot_type] = raw_blob
+                # b_len comes from the file: clamp to the bytes that exist and only
+                # materialise the blob kinds that are hashed or decoded below.
+                avail = max(0, slice_buf.slice_size - blob_slice_off)
+                needs_bytes = (
+                    b_magic in (CSMAGIC_EMBEDDED_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, CSMAGIC_BLOBWRAPPER)
+                    or slot_type in (CSSLOT_REQUIREMENTS, CSSLOT_ENTITLEMENTS, CSSLOT_DER_ENTITLEMENTS, CSSLOT_SIGNATURESLOT)
+                )
+                read_len = min(b_len, avail)
+                cap = ANALYSIS_LIMITS["cms_bytes"] if (b_magic == CSMAGIC_BLOBWRAPPER or slot_type == CSSLOT_SIGNATURESLOT) else blob_limit
+                if needs_bytes and read_len > cap:
+                    add_warning(warnings, "cs_blob_too_large", f"A {read_len:,}-byte code-signature sub-blob exceeds the {cap:,}-byte analysis limit and was not decoded.", limit=cap)
+                    needs_bytes = False
+                blob_key = (blob_slice_off, read_len)
+                if needs_bytes and blob_key not in read_blobs:
+                    if signature_budget < read_len or not runtime.spend_budget(
+                            "cs_file_bytes", read_len, ANALYSIS_LIMITS["cs_file_bytes"]):
+                        if not budget_warned:
+                            budget_warned = True
+                            add_warning(warnings, "cs_budget_exceeded", "The code-signature sub-blobs of this file add up to more than the analysis budget; the remaining ones were not decoded.", limit=ANALYSIS_LIMITS["cs_file_bytes"])
+                        needs_bytes = False
+                    else:
+                        signature_budget -= read_len
+                        read_blobs[blob_key] = cs_buf.read_bytes(blob_slice_off, read_len)
+                raw_blob = read_blobs[blob_key] if needs_bytes else b""
+                if needs_bytes and slot_type in (CSSLOT_REQUIREMENTS, CSSLOT_ENTITLEMENTS, CSSLOT_DER_ENTITLEMENTS):
+                    slot_raw_blobs[slot_type] = raw_blob
 
                 blobs.append({
                     "index": i,
@@ -398,23 +605,34 @@ def parse_code_signature(
                 })
 
                 if b_magic == CSMAGIC_CODEDIRECTORY:
-                    code_directories.append((slot_type, blob_slice_off, b_len))
+                    if len(code_directories) < ANALYSIS_LIMITS["cs_blobs"] and (slot_type, blob_slice_off, b_len) not in code_directories:
+                        code_directories.append((slot_type, blob_slice_off, b_len))
                 elif b_magic == CSMAGIC_EMBEDDED_ENTITLEMENTS or slot_type == CSSLOT_ENTITLEMENTS:
+                    if ("xml", blob_key) in decoded_once:
+                        continue  # the same bytes, already decoded this way
+                    decoded_once.add(("xml", blob_key))
                     xml_bytes = raw_blob[8:] if len(raw_blob) >= 8 else b""
                     entitlements_xml = xml_bytes.decode("utf-8", errors="replace").strip()
-                    try:
-                        parsed_plist = plistlib.loads(xml_bytes)
-                        if isinstance(parsed_plist, dict):
-                            entitlements_dict = parsed_plist
-                    except Exception:
-                        pass
+                    if _plist_too_deep(xml_bytes):   # a linear scan; such a plist is never built
+                        add_warning(warnings, "entitlements_truncated", "Entitlements are nested or sized beyond the analysis limits; deeper values are omitted.")
+                        entitlements_dict = {}
+                    elif _entitlements_decodable(xml_bytes, warnings):
+                        entitlements_dict = _load_entitlements_plist(xml_bytes)
+                    else:
+                        entitlements_dict = {}
                 elif (
                     b_magic == CSMAGIC_EMBEDDED_DER_ENTITLEMENTS
                     or slot_type == CSSLOT_DER_ENTITLEMENTS
                 ):
+                    if ("der", blob_key) in decoded_once:
+                        continue
+                    decoded_once.add(("der", blob_key))
                     der_bytes = raw_blob[8:] if len(raw_blob) >= 8 else b""
-                    der_entitlements_dict = decode_der_entitlements(der_bytes)
+                    der_entitlements_dict = decode_der_entitlements(der_bytes) if _entitlements_decodable(der_bytes, warnings) else {}
                 elif b_magic == CSMAGIC_BLOBWRAPPER or slot_type == CSSLOT_SIGNATURESLOT:
+                    if ("cms", blob_key) in decoded_once:
+                        continue
+                    decoded_once.add(("cms", blob_key))
                     cms_payload = raw_blob[8:] if len(raw_blob) >= 8 else b""
                     certs = parse_cms_certificates(cms_payload)
                     cms_signature_info = {
@@ -427,6 +645,11 @@ def parse_code_signature(
     # Merge DER entitlements if XML was absent
     if not entitlements_dict and der_entitlements_dict:
         entitlements_dict = der_entitlements_dict
+    if entitlements_dict:
+        safe, was_truncated = _json_safe(entitlements_dict)
+        entitlements_dict = safe if isinstance(safe, dict) else {}
+        if was_truncated:
+            add_warning(warnings, "entitlements_truncated", "Entitlements are nested or sized beyond the analysis limits; deeper values are omitted.")
 
     entitlements_entries: List[Dict[str, Any]] = []
     for k, v in entitlements_dict.items():

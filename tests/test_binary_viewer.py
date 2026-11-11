@@ -571,12 +571,17 @@ class TestBinaryStudioBackend(unittest.TestCase):
         self.assertTrue(sec64["stack_canary"])
         self.assertTrue(sec64["pac_enabled"])  # Intel CET IBT | SHSTK
 
-        # Verify x86_64 Disassembly at entry point 0x1040
+        # Verify x86_64 Disassembly at entry point 0x1040. Whichever decoder runs
+        # (objdump in local mode when installed, else the built-in one) the user
+        # sees Intel syntax with the same mnemonics; see test_16 for the cross-check.
         dis64 = self.service.disassemble(slice_index=0, vmaddr="0x1040", count=10)
         mnems = [i["mnemonic"] for i in dis64["instructions"]]
-        self.assertEqual(mnems[0], "endbr64")
-        self.assertIn("push", mnems)
-        self.assertIn("call", mnems)
+        self.assertEqual(
+            mnems,
+            ["endbr64", "push", "mov", "sub", "lea", "call", "xor", "leave", "ret", "syscall"],
+            f"decoder={dis64.get('decoder')}",
+        )
+        self.assertEqual(dis64["instructions"][1]["operands"], "rbp")
 
         # Verify ELF32 non-PIE with executable stack warning
         doc32 = self.service.load_file(self.fixtures["synthetic_elf32"])
@@ -779,6 +784,52 @@ class TestBinaryStudioBackend(unittest.TestCase):
             self.assertIn("DYN", out)
             self.assertIn("/lib64/ld-linux-x86-64.so.2", out)
             self.assertIn(sl["overview"]["uuid"].lower(), out.lower())
+
+    def test_16_x86_disassembly_is_decoder_independent(self) -> None:
+        """
+        The built-in x86 decoder and the objdump path must present one syntax
+        (Intel, unsuffixed mnemonics): with external tools disabled the result is
+        always the built-in decoder's, and where both run, every instruction the
+        built-in decoder recognises matches objdump's mnemonic and length.
+        """
+        from backend import runtime
+        from backend.disasm import _find_objdump, disassemble_window
+
+        cases = [
+            (self.fixtures["synthetic_elf64"], 0x1040),
+            (self.fixtures["synthetic_elf32"], None),
+            (self.fixtures["synthetic_pe64"], None),
+            (self.fixtures["synthetic_pe32"], None),
+        ]
+        for path, start in cases:
+            with open(path, "rb") as fh:
+                data = fh.read()
+            sl = parse_macho_bytes(data, path=path)["slices"][0]
+            if start is None:
+                start = int(sl["entry_point"]["vmaddr"], 16)
+            raw = data[sl["slice_base_offset"]: sl["slice_base_offset"] + sl["slice_size"]]
+
+            with runtime.use_config(runtime.RuntimeConfig("public")):
+                builtin = disassemble_window(sl, raw, sl["slice_base_offset"], start, 24, file_path=path)
+            self.assertEqual(builtin["decoder"], "builtin")
+            self.assertEqual(builtin["syntax"], "intel")
+            b_mnems = [i["mnemonic"] for i in builtin["instructions"]]
+            self.assertIn("push", b_mnems, path)
+            att_spellings = {"pushq", "pushl", "popq", "movq", "movl", "callq", "calll", "retq", "retl", "subq", "subl", "leaq", "xorl", "xorq"}
+            self.assertFalse(att_spellings & set(b_mnems), b_mnems)
+
+            if not _find_objdump():
+                continue
+            with runtime.use_config(runtime.RuntimeConfig("local")):
+                ext = disassemble_window(sl, raw, sl["slice_base_offset"], start, 24, file_path=path)
+            self.assertEqual(ext["decoder"], "objdump", path)
+            by_vm = {i["vmaddr"]: i for i in ext["instructions"]}
+            for ins in builtin["instructions"]:
+                if ins["mnemonic"] == ".byte" or ins["vmaddr"] not in by_vm:
+                    continue
+                self.assertEqual(ins["mnemonic"], by_vm[ins["vmaddr"]]["mnemonic"], f"{path} @ {ins['vmaddr']}")
+                self.assertFalse(att_spellings & {by_vm[ins["vmaddr"]]["mnemonic"]})
+                self.assertEqual(ins["size"], by_vm[ins["vmaddr"]]["size"], f"{path} @ {ins['vmaddr']}")
 
 
 if __name__ == "__main__":

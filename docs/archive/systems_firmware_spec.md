@@ -1,3 +1,5 @@
+> **Archived.** Design document from the first version of the project (2026). It does not describe the current code and its status lines ("locked", "authoritative", "proposed") no longer apply. See [docs/architecture.md](../architecture.md).
+
 # BinaryStudio — Systems Software & Firmware Binary Analysis Engine Specification
 
 **Project Name:** **BinaryStudio** (`binary_viewer.py` / `macho_viewer.py`)

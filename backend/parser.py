@@ -12,9 +12,11 @@ import subprocess
 import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .buffer import BinaryBuffer, make_region
+from . import runtime
+from .buffer import BinaryBuffer, BinaryFormatError, SegmentLookup, add_warning, make_region
 from .codesign import parse_code_signature
 from .constants import (
+    ANALYSIS_LIMITS,
     BUILD_TOOLS,
     CHAINED_IMPORT_FORMATS,
     CHAINED_PTR_FORMATS,
@@ -96,11 +98,15 @@ from .constants import (
     format_source_version,
     format_vm_prot,
 )
-from .elf_parser import ELF_MAGIC, parse_elf_slice
+from .elf_parser import ELF_MAGIC, _demangle_elf_symbol, parse_elf_slice
 from .pe_parser import is_pe_bytes, parse_pe_slice
-from .pedagogy import build_pedagogy_bundle
+from .pedagogy import annotate_fat_header_pedagogy, build_pedagogy_bundle
 from .security import evaluate_security_posture
 from .semantics import build_semantic_layers
+
+
+# A whole NUL-delimited C string made only of printable ASCII / tab / LF / CR.
+_CSTRING_RUN_2 = re.compile(rb"(?:^|(?<=\x00))[\x20-\x7e\t\n\r]{2,}(?=\x00|\Z)")
 
 
 # ============================================================================
@@ -108,8 +114,11 @@ from .semantics import build_semantic_layers
 # ============================================================================
 def _batch_demangle(names: List[str]) -> Dict[str, str]:
     """
-    Demangles C++ (_Z / __Z) and Swift (_$s / _$S) symbol names using system `c++filt`
-    with a fast pure-Python fallback.
+    Demangles C++ (_Z / __Z) and Swift (_$s / _$S) symbol names.
+
+    Uses the system `c++filt` only when the runtime allows external tools (local
+    mode); public / WASM mode always uses the pure-Python fallback, so results
+    there never depend on what happens to be installed on the host.
     """
     to_demangle = [
         n
@@ -120,8 +129,17 @@ def _batch_demangle(names: List[str]) -> Dict[str, str]:
         return {}
 
     result: Dict[str, str] = {}
-    cpp_candidates = [n for n in to_demangle if n.startswith("__Z") or n.startswith("_Z")]
-    if cpp_candidates and os.path.exists("/usr/bin/c++filt"):
+    # c++filt is line-oriented: a name containing a line break would shift every
+    # following result onto the wrong symbol.
+    cpp_candidates = [
+        n for n in to_demangle
+        if (n.startswith("__Z") or n.startswith("_Z")) and "\n" not in n and "\r" not in n
+    ]
+    if (
+        cpp_candidates
+        and runtime.get_config().allow_external_tools
+        and os.path.exists("/usr/bin/c++filt")
+    ):
         try:
             proc = subprocess.run(
                 ["/usr/bin/c++filt", "-_"],
@@ -132,14 +150,20 @@ def _batch_demangle(names: List[str]) -> Dict[str, str]:
             )
             if proc.returncode == 0:
                 lines = proc.stdout.splitlines()
-                for orig, dem in zip(cpp_candidates, lines):
-                    result[orig] = dem.strip()
+                if len(lines) == len(cpp_candidates):
+                    for orig, dem in zip(cpp_candidates, lines):
+                        result[orig] = dem.strip()
         except Exception:
             pass
 
     for n in to_demangle:
         if n not in result:
-            if n.startswith("_") and not n.startswith("__"):
+            if n.startswith("__Z"):
+                # Mach-O adds a leading underscore to the Itanium name.
+                result[n] = _demangle_elf_symbol(n[1:])
+                if result[n] == n[1:]:
+                    result[n] = n
+            elif n.startswith("_") and not n.startswith("__"):
                 result[n] = n[1:]
             else:
                 result[n] = n
@@ -154,18 +178,45 @@ def parse_exports_trie(
     trie_off: int,
     trie_size: int,
     text_vmaddr: int,
-    max_exports: int = 2000,
+    max_exports: Optional[int] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    if trie_size <= 0 or trie_off + trie_size > slice_buf.slice_size:
+    """
+    Walks the export trie iteratively. Each node is visited at most once (cycles
+    and shared children are ignored), names are capped at
+    ANALYSIS_LIMITS["export_name_chars"], and the walk stops after
+    ANALYSIS_LIMITS["export_trie_nodes"] nodes or `max_exports` terminals.
+    """
+    if max_exports is None:
+        max_exports = ANALYSIS_LIMITS["exports"]
+    if warnings is None:
+        warnings = []
+    if trie_size <= 0 or trie_off < 0 or trie_off + trie_size > slice_buf.slice_size:
+        if trie_size > 0:
+            add_warning(warnings, "exports_trie_out_of_range", "Export trie lies outside the file; exports not shown.")
         return []
 
     exports: List[Dict[str, Any]] = []
     visited: Set[int] = set()
+    max_nodes = ANALYSIS_LIMITS["export_trie_nodes"]
+    max_name = ANALYSIS_LIMITS["export_name_chars"]
+    pending_limit = max_nodes * 2
+    # Bound the memory held by not-yet-visited names (each is a full prefix copy).
+    pending_chars = 0
+    pending_chars_limit = 16 * 1024 * 1024
 
     # Queue of (relative_node_offset, symbol_prefix)
     stack: List[Tuple[int, str]] = [(0, "")]
-    while stack and len(exports) < max_exports:
+    while stack:
+        if len(exports) >= max_exports:
+            add_warning(warnings, "exports_truncated", f"Only the first {max_exports:,} exports are shown.", limit=max_exports)
+            break
+        if len(visited) >= max_nodes:
+            add_warning(warnings, "exports_trie_nodes", f"Export trie walk stopped after {max_nodes:,} nodes.", limit=max_nodes)
+            break
+        runtime.check_deadline()
         rel_off, prefix = stack.pop()
+        pending_chars -= len(prefix)
         if rel_off < 0 or rel_off >= trie_size or rel_off in visited:
             continue
         visited.add(rel_off)
@@ -228,8 +279,18 @@ def parse_exports_trie(
             children_pos += edge_len
             child_rel_off, c_len = slice_buf.read_uleb128(children_pos)
             children_pos += c_len
+            if child_rel_off in visited or child_rel_off >= trie_size:
+                continue
+            if len(prefix) + len(edge_str) > max_name:
+                add_warning(warnings, "export_name_too_long", f"Export names longer than {max_name:,} characters were skipped.", limit=max_name)
+                continue
             child_entries.append((child_rel_off, prefix + edge_str))
 
+        added_chars = sum(len(c[1]) for c in child_entries)
+        if len(stack) + len(child_entries) > pending_limit or pending_chars + added_chars > pending_chars_limit:
+            add_warning(warnings, "exports_trie_nodes", f"Export trie walk stopped after {len(visited):,} nodes (work limit).", limit=max_nodes)
+            break
+        pending_chars += added_chars
         for child_entry in reversed(child_entries):
             stack.append(child_entry)
 
@@ -245,8 +306,13 @@ def parse_chained_fixups(
     datasize: int,
     segments: List[Dict[str, Any]],
     dylibs: List[Dict[str, Any]],
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    if warnings is None:
+        warnings = []
     if datasize < 28 or dataoff + datasize > slice_buf.slice_size:
+        if datasize > 0:
+            add_warning(warnings, "chained_fixups_out_of_range", "LC_DYLD_CHAINED_FIXUPS payload is truncated or outside the file; fixups not shown.")
         return {}
 
     cf_buf = slice_buf.clone_with_fields()
@@ -272,9 +338,12 @@ def parse_chained_fixups(
     imports_list: List[Dict[str, Any]] = []
     imp_base = dataoff + imports_offset
     sym_base = dataoff + symbols_offset
-    max_imports = min(imports_count, 500)
+    max_imports = min(imports_count, ANALYSIS_LIMITS["imports"])
+    if imports_count > max_imports:
+        add_warning(warnings, "imports_truncated", f"Only the first {max_imports:,} of {imports_count:,} chained-fixup imports are shown.", limit=max_imports, total=imports_count)
 
     for i in range(max_imports):
+        runtime.check_deadline()
         if imports_format == 1:  # DYLD_CHAINED_IMPORT (4 bytes)
             pos = imp_base + i * 4
             if pos + 4 > dataoff + datasize:
@@ -329,7 +398,9 @@ def parse_chained_fixups(
     starts_pos = dataoff + starts_offset
     if starts_offset > 0 and starts_pos + 4 <= dataoff + datasize:
         seg_count = cf_buf.u32(starts_pos)
-        for seg_idx in range(min(seg_count, 32)):
+        if seg_count > ANALYSIS_LIMITS["fixup_segments"]:
+            add_warning(warnings, "fixup_segments_truncated", f"Only the first {ANALYSIS_LIMITS['fixup_segments']} of {seg_count:,} chained-fixup segments are decoded.", limit=ANALYSIS_LIMITS["fixup_segments"], total=seg_count)
+        for seg_idx in range(min(seg_count, ANALYSIS_LIMITS["fixup_segments"])):
             seg_info_off = cf_buf.u32(starts_pos + 4 + seg_idx * 4)
             if seg_info_off == 0:
                 continue
@@ -345,7 +416,10 @@ def parse_chained_fixups(
             pointer_format_name = CHAINED_PTR_FORMATS.get(ptr_fmt, f"PTR_FMT_{ptr_fmt}")
 
             valid_pages = 0
-            for p_idx in range(min(page_count, 256)):
+            if page_count > ANALYSIS_LIMITS["fixup_pages"]:
+                add_warning(warnings, "fixup_pages_truncated", f"Chained-fixup page starts are decoded for the first {ANALYSIS_LIMITS['fixup_pages']} pages of each segment.", limit=ANALYSIS_LIMITS["fixup_pages"])
+            for p_idx in range(min(page_count, ANALYSIS_LIMITS["fixup_pages"])):
+                runtime.check_deadline()
                 p_start = cf_buf.u16(s_pos + 22 + p_idx * 2)
                 if p_start == 0xFFFF:
                     continue
@@ -519,6 +593,7 @@ def _parse_macho_slice(
         slice_size=slice_size,
         little_endian=little_endian,
     )
+    warnings: List[Dict[str, Any]] = []
 
     magic = buf.u32(0)
     cputype = buf.u32(4)
@@ -594,15 +669,21 @@ def _parse_macho_slice(
     encryption_info: Dict[str, Any] = {"present": False, "cryptoff": 0, "cryptsize": 0, "cryptid": 0}
 
     cmd_off = hdr_size
-    max_cmds = min(ncmds, 512)
+    max_cmds = min(ncmds, ANALYSIS_LIMITS["load_commands"])
+    if ncmds > max_cmds:
+        add_warning(warnings, "load_commands_truncated", f"Header declares {ncmds:,} load commands; only the first {max_cmds:,} are parsed.", limit=max_cmds, total=ncmds)
+    sections_limit = ANALYSIS_LIMITS["sections_total"]
 
     for cmd_idx in range(max_cmds):
+        runtime.check_deadline()
         if cmd_off + 8 > slice_size:
+            add_warning(warnings, "load_commands_past_eof", f"Load commands end at the end of the file after {cmd_idx} of {ncmds:,} declared commands.", total=ncmds)
             break
         lc_buf = buf.clone_with_fields()
         cmd = lc_buf.u32(cmd_off)
         cmdsize = lc_buf.u32(cmd_off + 4)
         if cmdsize < 8 or cmd_off + cmdsize > slice_size:
+            add_warning(warnings, "load_command_bad_size", f"Load command #{cmd_idx} has an invalid cmdsize ({cmdsize}); parsing of load commands stopped there.")
             break
 
         cmd_name = LOAD_COMMAND_NAMES.get(cmd, f"LC_UNKNOWN_0x{cmd:x}")
@@ -614,8 +695,11 @@ def _parse_macho_slice(
         summary = cmd_name
         details: Dict[str, Any] = {}
 
+        if cmd in (LC_SEGMENT_64, LC_SEGMENT) and len(segments) >= ANALYSIS_LIMITS["segments"]:
+            add_warning(warnings, "segments_truncated", f"Only the first {ANALYSIS_LIMITS['segments']:,} segments are mapped; later LC_SEGMENT commands are listed but not decoded.", limit=ANALYSIS_LIMITS["segments"])
+
         # --- LC_SEGMENT_64 / LC_SEGMENT ---
-        if cmd in (LC_SEGMENT_64, LC_SEGMENT):
+        if cmd in (LC_SEGMENT_64, LC_SEGMENT) and len(segments) < ANALYSIS_LIMITS["segments"]:
             seg_is_64 = cmd == LC_SEGMENT_64
             segname = lc_buf.fixed_cstr(cmd_off + 8, 16)
             lc_buf.record_field("segname", "char[16]", cmd_off + 8, 16, segname, segname, segname, "Segment name")
@@ -668,9 +752,15 @@ def _parse_macho_slice(
 
             # Parse Sections in Segment
             seg_sections: List[Dict[str, Any]] = []
-            for s_idx in range(min(nsects, 256)):
+            if nsects > ANALYSIS_LIMITS["sections_per_segment"]:
+                add_warning(warnings, "sections_per_segment_truncated", f"Segment {segname!r} declares {nsects:,} sections; only the first {ANALYSIS_LIMITS['sections_per_segment']} are parsed.", limit=ANALYSIS_LIMITS["sections_per_segment"], total=nsects)
+            for s_idx in range(min(nsects, ANALYSIS_LIMITS["sections_per_segment"])):
                 sh_off = sect_hdr_base + s_idx * sect_hdr_size
                 if sh_off + sect_hdr_size > cmd_off + cmdsize:
+                    add_warning(warnings, "section_headers_past_cmd", f"Segment {segname!r} declares more section headers than fit in its load command.")
+                    break
+                if len(all_sections_ordered) >= sections_limit:
+                    add_warning(warnings, "sections_truncated", f"Only the first {sections_limit:,} sections are parsed.", limit=sections_limit)
                     break
                 sec_buf = buf.clone_with_fields()
                 sectname = sec_buf.fixed_cstr(sh_off, 16)
@@ -1197,10 +1287,11 @@ def _parse_macho_slice(
             f_vmaddr = lc_buf.u64(cmd_off + 8)
             f_fileoff = lc_buf.u64(cmd_off + 16)
             entry_id_off = lc_buf.u32(cmd_off + 24)
-            entry_id, _ = lc_buf.cstr_at(cmd_off + entry_id_off, max(0, cmdsize - entry_id_off))
+            entry_id, _ = lc_buf.cstr_at(cmd_off + entry_id_off, max(0, cmdsize - entry_id_off)) if entry_id_off < cmdsize else ("", 0)
             lc_buf.record_field("vmaddr", "uint64", cmd_off + 8, 8, f_vmaddr, f"0x{f_vmaddr:x}")
             lc_buf.record_field("fileoff", "uint64", cmd_off + 16, 8, f_fileoff, f"0x{f_fileoff:x}", target_offset=slice_base + f_fileoff)
-            lc_buf.record_field("entry_id", "string", cmd_off + entry_id_off, cmdsize - entry_id_off, entry_id, entry_id)
+            if entry_id_off < cmdsize:
+                lc_buf.record_field("entry_id", "string", cmd_off + entry_id_off, cmdsize - entry_id_off, entry_id, entry_id)
             fe_obj = {
                 "entry_id": entry_id,
                 "vmaddr": f"0x{f_vmaddr:x}",
@@ -1273,31 +1364,36 @@ def _parse_macho_slice(
     symbols: List[Dict[str, Any]] = []
     if symtab_cmd:
         symoff = symtab_cmd["symoff"]
-        nsyms = min(symtab_cmd["nsyms"], 10000)
+        declared_nsyms = symtab_cmd["nsyms"]
+        nsyms = min(declared_nsyms, ANALYSIS_LIMITS["symbols"])
         stroff = symtab_cmd["stroff"]
         strsize = symtab_cmd["strsize"]
         ent_size = 16 if is_64 else 12
+        if declared_nsyms > nsyms:
+            add_warning(warnings, "symbols_truncated", f"Symbol table has {declared_nsyms:,} entries; only the first {nsyms:,} are shown.", limit=nsyms, total=declared_nsyms)
+        if symoff + declared_nsyms * ent_size > slice_size:
+            add_warning(warnings, "symtab_past_eof", "LC_SYMTAB symbol table extends past the end of the file; entries beyond EOF are not shown.")
+        nlist_struct = struct.Struct(("<" if little_endian else ">") + ("IBBHQ" if is_64 else "IBBHI"))
+        name_limit = ANALYSIS_LIMITS["symbol_name_bytes"]
 
         raw_sym_names: List[str] = []
-        parsed_raw_syms: List[Tuple[int, int, int, int, int, int, str]] = []
+        parsed_raw_syms: List[Tuple[int, int, int, int, int, int, int, str]] = []
 
         for s_i in range(nsyms):
+            runtime.check_deadline()
             pos = symoff + s_i * ent_size
             if pos + ent_size > slice_size:
                 break
-            n_strx = buf.u32(pos)
-            n_type = buf.u8(pos + 4)
-            n_sect = buf.u8(pos + 5)
-            n_desc = buf.u16(pos + 6)
-            n_value = buf.u64(pos + 8) if is_64 else buf.u32(pos + 8)
+            n_strx, n_type, n_sect, n_desc, n_value = nlist_struct.unpack(buf.read_bytes(pos, ent_size))
 
             sym_name = ""
             if 0 < n_strx < strsize:
-                sym_name, _ = buf.cstr_at(stroff + n_strx, 512)
+                sym_name, _ = buf.cstr_at(stroff + n_strx, name_limit)
             raw_sym_names.append(sym_name)
             parsed_raw_syms.append((s_i, pos, n_strx, n_type, n_sect, n_desc, n_value, sym_name))
 
         demangled_map = _batch_demangle(raw_sym_names)
+        seg_lookup = SegmentLookup(segments)
 
         for s_i, pos, n_strx, n_type, n_sect, n_desc, n_value, sym_name in parsed_raw_syms:
             is_stab = bool(n_type & N_STAB)
@@ -1328,10 +1424,9 @@ def _parse_macho_slice(
 
             target_abs_off: Optional[int] = None
             if type_masked == N_SECT and n_value > 0:
-                for seg in segments:
-                    if seg["vmaddr_int"] <= n_value < seg["vmaddr_int"] + seg["filesize"]:
-                        target_abs_off = slice_base + seg["fileoff"] + (n_value - seg["vmaddr_int"])
-                        break
+                seg_file_off = seg_lookup.file_offset(n_value)
+                if seg_file_off is not None:
+                    target_abs_off = slice_base + seg_file_off
 
             symbols.append({
                 "index": s_i,
@@ -1361,8 +1456,14 @@ def _parse_macho_slice(
     indirect_symbols: List[Dict[str, Any]] = []
     if dysymtab_cmd and dysymtab_cmd.get("nindirectsyms", 0) > 0:
         ind_off = dysymtab_cmd["indirectsymoff"]
-        n_ind = min(dysymtab_cmd["nindirectsyms"], 2000)
+        ind_limit = ANALYSIS_LIMITS["indirect_symbols"]
+        n_ind = min(dysymtab_cmd["nindirectsyms"], ind_limit)
+        if dysymtab_cmd["nindirectsyms"] > ind_limit:
+            add_warning(warnings, "indirect_symbols_truncated", f"Only the first {ind_limit:,} of {dysymtab_cmd['nindirectsyms']:,} indirect symbol table entries are read.", limit=ind_limit, total=dysymtab_cmd["nindirectsyms"])
         for sec in all_sections_ordered:
+            if len(indirect_symbols) >= ind_limit:
+                add_warning(warnings, "indirect_symbols_truncated", f"Only {ind_limit:,} indirect symbol slots are shown.", limit=ind_limit)
+                break
             s_type = sec["section_type"]
             if s_type in (
                 "S_SYMBOL_STUBS",
@@ -1375,7 +1476,8 @@ def _parse_macho_slice(
                     continue
                 count_slots = sec["size"] // stride
                 start_ind_idx = sec["reserved1"]
-                for slot_i in range(min(count_slots, 512)):
+                for slot_i in range(min(count_slots, ind_limit - len(indirect_symbols))):
+                    runtime.check_deadline()
                     table_idx = start_ind_idx + slot_i
                     if table_idx >= n_ind or ind_off + (table_idx + 1) * 4 > slice_size:
                         break
@@ -1428,17 +1530,17 @@ def _parse_macho_slice(
     chained_fixups_obj: Dict[str, Any] = {}
     if chained_fixups_cmd:
         chained_fixups_obj = parse_chained_fixups(
-            buf, chained_fixups_cmd[0], chained_fixups_cmd[1], segments, dylibs
+            buf, chained_fixups_cmd[0], chained_fixups_cmd[1], segments, dylibs, warnings
         )
 
     exports_list: List[Dict[str, Any]] = []
     if exports_trie_cmd:
         exports_list = parse_exports_trie(
-            buf, exports_trie_cmd[0], exports_trie_cmd[1], text_vmaddr
+            buf, exports_trie_cmd[0], exports_trie_cmd[1], text_vmaddr, warnings=warnings
         )
     elif dyld_info_cmd and dyld_info_cmd.get("export_size", 0) > 0:
         exports_list = parse_exports_trie(
-            buf, dyld_info_cmd["export_off"], dyld_info_cmd["export_size"], text_vmaddr
+            buf, dyld_info_cmd["export_off"], dyld_info_cmd["export_size"], text_vmaddr, warnings=warnings
         )
 
     dyld_info_obj = {
@@ -1463,7 +1565,12 @@ def _parse_macho_slice(
         cur_fs = fs_off
         end_fs = min(slice_size, fs_off + fs_size)
         addr_accum = 0
-        while cur_fs < end_fs and len(function_starts) < 5000:
+        fs_limit = ANALYSIS_LIMITS["function_starts"]
+        while cur_fs < end_fs:
+            if len(function_starts) >= fs_limit:
+                add_warning(warnings, "function_starts_truncated", f"Only the first {fs_limit:,} LC_FUNCTION_STARTS entries are shown.", limit=fs_limit)
+                break
+            runtime.check_deadline()
             delta, d_len = buf.read_uleb128(cur_fs)
             cur_fs += d_len
             if delta == 0:
@@ -1492,7 +1599,15 @@ def _parse_macho_slice(
         "__oslogstring",
     }
 
+    strings_limit = ANALYSIS_LIMITS["strings"]
+    scan_budget = ANALYSIS_LIMITS["string_scan_bytes"]
     for sec in all_sections_ordered:
+        if len(strings_list) >= strings_limit:
+            add_warning(warnings, "strings_truncated", f"Only the first {strings_limit:,} strings are shown.", limit=strings_limit)
+            break
+        if scan_budget <= 0:
+            add_warning(warnings, "strings_scan_budget", "String extraction stopped after scanning its byte budget; later sections were not scanned.", limit=ANALYSIS_LIMITS["string_scan_bytes"])
+            break
         sname = sec["sectname"]
         stype = sec["section_type"]
         if (
@@ -1502,57 +1617,57 @@ def _parse_macho_slice(
             or "cfg" in sname.lower()
         ):
             s_off = sec["slice_offset"]
-            s_sz = min(sec["size"], 262144)
+            s_sz = min(sec["size"], ANALYSIS_LIMITS["string_section_bytes"], scan_budget)
             if s_off <= 0 or s_off + s_sz > slice_size:
                 continue
+            scan_budget -= s_sz
             raw_sec = buf.read_bytes(s_off, s_sz)
-            pos = 0
-            while pos < len(raw_sec) and len(strings_list) < 3000:
-                nul = raw_sec.find(b"\x00", pos)
-                if nul == -1:
-                    chunk = raw_sec[pos:]
-                    next_pos = len(raw_sec)
-                else:
-                    chunk = raw_sec[pos:nul]
-                    next_pos = nul + 1
-                if len(chunk) >= 2:
-                    try:
-                        s_val = chunk.decode("utf-8")
-                        if all(32 <= ord(ch) <= 126 or ch in "\t\n\r" for ch in s_val):
-                            s_vm = sec["vmaddr_int"] + pos
-                            s_sl_off = s_off + pos
-                            strings_list.append({
-                                "index": len(strings_list),
-                                "source": f"{sec['segname']},{sec['sectname']}",
-                                "vmaddr": f"0x{s_vm:x}",
-                                "slice_offset": s_sl_off,
-                                "abs_offset": slice_base + s_sl_off,
-                                "length": len(s_val),
-                                "encoding": "UTF-8",
-                                "value": s_val,
-                            })
-                            if sname == "__objc_classname":
-                                objc_classes.append(s_val)
-                            elif sname == "__objc_methname":
-                                objc_selectors.append(s_val)
-                    except UnicodeDecodeError:
-                        pass
-                pos = next_pos
+            # NUL-separated runs of printable ASCII (plus tab / newline / CR), at least
+            # 2 bytes long, as before -- but matched in C rather than one Python
+            # iteration per NUL byte.
+            for m in _CSTRING_RUN_2.finditer(raw_sec):
+                if len(strings_list) >= strings_limit:
+                    break
+                runtime.check_deadline()
+                pos = m.start()
+                s_val = m.group(0).decode("ascii")
+                s_vm = sec["vmaddr_int"] + pos
+                s_sl_off = s_off + pos
+                strings_list.append({
+                    "index": len(strings_list),
+                    "source": f"{sec['segname']},{sec['sectname']}",
+                    "vmaddr": f"0x{s_vm:x}",
+                    "slice_offset": s_sl_off,
+                    "abs_offset": slice_base + s_sl_off,
+                    "length": len(s_val),
+                    "encoding": "UTF-8",
+                    "value": s_val,
+                })
+                if sname == "__objc_classname":
+                    objc_classes.append(s_val)
+                elif sname == "__objc_methname":
+                    objc_selectors.append(s_val)
 
     # For Firmware (MH_PRELOAD) or binaries with few sectioned strings, scan raw printable strings
     if filetype == MH_PRELOAD or len(strings_list) < 5:
         ascii_re = re.compile(rb"[\x20-\x7e]{5,256}")
         seen_offsets = {st["slice_offset"] for st in strings_list}
+        raw_limit = min(strings_limit, len(strings_list) + 500)
+        raw_budget = ANALYSIS_LIMITS["string_scan_bytes"]
         for seg in segments:
+            if len(strings_list) >= raw_limit or raw_budget <= 0:
+                break
             if seg["filesize"] <= 0:
                 continue
             scan_off = seg["fileoff"]
-            scan_len = min(seg["filesize"], 131072)
+            scan_len = min(seg["filesize"], 131072, raw_budget)
+            raw_budget -= scan_len
             raw_seg = buf.read_bytes(scan_off, scan_len)
             for m in ascii_re.finditer(raw_seg):
                 rel_o = scan_off + m.start()
                 if rel_o in seen_offsets or rel_o < hdr_size + sizeofcmds:
                     continue
+                seen_offsets.add(rel_o)
                 s_val = m.group(0).decode("ascii", errors="replace")
                 s_vm = seg["vmaddr_int"] + m.start()
                 strings_list.append({
@@ -1565,7 +1680,7 @@ def _parse_macho_slice(
                     "encoding": "ASCII",
                     "value": s_val,
                 })
-                if len(strings_list) >= 500:
+                if len(strings_list) >= raw_limit:
                     break
 
     objc_metadata = {
@@ -1577,7 +1692,7 @@ def _parse_macho_slice(
 
     # Parse Code Signature (LC_CODE_SIGNATURE)
     if code_sig_cmd:
-        code_sig_detail = parse_code_signature(buf, code_sig_cmd[0], code_sig_cmd[1])
+        code_sig_detail = parse_code_signature(buf, code_sig_cmd[0], code_sig_cmd[1], warnings=warnings)
     else:
         code_sig_detail = {
             "present": False,
@@ -1707,6 +1822,8 @@ def _parse_macho_slice(
         "code_signature_detail": code_sig_detail,
         "security_posture": security_posture,
         "intervals": intervals,
+        "warnings": warnings,
+        "truncated": bool(warnings),
     }
 
 
@@ -1727,17 +1844,71 @@ def _enrich_slice_semantics_and_pedagogy(
     s_base = slice_obj.get("slice_base_offset", 0)
     s_size = slice_obj.get("slice_size", file_size)
     raw_slice = full_data[s_base : min(file_size, s_base + s_size)]
-    slice_obj["semantic_layers"] = build_semantic_layers(slice_obj, raw_slice, file_size)
-    slice_obj["pedagogy"] = build_pedagogy_bundle(slice_obj)
+    warnings = slice_obj.setdefault("warnings", [])
+    # These layers are derived views. A defect in one of them must not cost the
+    # user the whole structural document, so failures degrade to an empty layer
+    # plus a visible warning (code "analysis_error"; the fuzz harness treats that
+    # code as a bug). Time-budget and memory errors still propagate.
+    runtime.check_deadline()  # between phases, so each slice of a many-slice file is a checkpoint
+    try:
+        slice_obj["semantic_layers"] = build_semantic_layers(slice_obj, raw_slice, file_size)
+    except (runtime.ParseBudgetExceeded, MemoryError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        slice_obj["semantic_layers"] = _empty_semantic_layers()
+        add_warning(warnings, "analysis_error", f"Semantic analysis failed on this input ({type(exc).__name__}); that view is empty.")
+    runtime.check_deadline()
+    try:
+        slice_obj["pedagogy"] = build_pedagogy_bundle(slice_obj)
+    except (runtime.ParseBudgetExceeded, MemoryError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        slice_obj["pedagogy"] = {"loader_lifecycle": {"stages": []}, "rosetta_stone": [], "guided_tours": []}
+        add_warning(warnings, "analysis_error", f"Learning annotations failed on this input ({type(exc).__name__}); that view is empty.")
+    slice_obj["truncated"] = bool(warnings)
     return slice_obj
+
+
+def _empty_semantic_layers() -> Dict[str, Any]:
+    dist = {"null_pct": 0.0, "ascii_pct": 0.0, "control_pct": 0.0, "high_pct": 0.0}
+    return {
+        "entropy_analysis": {
+            "overall_entropy": 0.0, "max_window_entropy": 0.0, "overall_classification": "",
+            "overall_badge": "badge-slate", "overall_explanation": "", "packing_assessment": "",
+            "byte_distribution": dist, "byte_class_distribution": dist,
+            "sections": [], "section_metrics": [], "windows": [], "sliding_windows": [],
+        },
+        "capabilities": {
+            "active_categories_count": 0, "total_categories": 0, "total_matched_indicators": 0,
+            "cards": [], "categories": [], "string_intelligence": {
+                "paths_and_libs": [], "file_paths": [], "urls": [], "registry_keys": [],
+                "crypto_and_security": [], "diagnostics_and_banners": [],
+            },
+        },
+        "provenance": {
+            "format_family": "", "os_and_abi": "", "abi": "", "architecture": "",
+            "compiler_toolchain": "", "compiler_family": "", "linker_info": [],
+            "source_languages": [], "inferred_languages": [], "strip_level": "",
+            "build_id_or_uuid": "", "debug_or_source_artifact": "", "debug_artifacts": [],
+            "rich_header_tools": [],
+        },
+        "anomalies": {"total_count": 0, "high_severity_count": 0, "findings": []},
+    }
 
 
 # ============================================================================
 # Top-Level Multi-Format Binary Entrypoint (Mach-O / Universal, ELF32/64, PE32/64)
 # ============================================================================
 def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
+    # One set of work budgets per file: work that cannot be interrupted once started
+    # (plist decoding, signature scans) is bounded across all slices together.
+    with runtime.work_budgets():
+        return _parse_any_format(data, path)
+
+
+def _parse_any_format(data: bytes, path: str) -> Dict[str, Any]:
     if len(data) < 28:
-        raise ValueError(f"File too small ({len(data)} bytes) to be a valid Mach-O, ELF, or PE binary.")
+        raise BinaryFormatError(f"File too small ({len(data)} bytes) to be a valid Mach-O, ELF, or PE binary.")
 
     file_size = len(data)
     sha256_hex = hashlib.sha256(data).hexdigest()
@@ -1758,6 +1929,7 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 "format_display": "ELF64" if elf_slice["header"]["is_64bit"] else "ELF32",
                 "is_fat": False,
                 "fat_header": None,
+                "warnings": [],
             },
             "slices": [elf_slice],
         }
@@ -1777,6 +1949,7 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 "format_display": "PE32+" if pe_slice["header"]["is_64bit"] else "PE32",
                 "is_fat": False,
                 "fat_header": None,
+                "warnings": [],
             },
             "slices": [pe_slice],
         }
@@ -1787,6 +1960,7 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
 
     is_fat = False
     fat_header_obj: Optional[Dict[str, Any]] = None
+    fat_warnings: List[Dict[str, Any]] = []
     slices_list: List[Dict[str, Any]] = []
 
     if magic_be in (FAT_MAGIC, FAT_MAGIC_64, FAT_CIGAM, FAT_CIGAM_64):
@@ -1821,6 +1995,8 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             )
 
             arch_entry_size = 32 if fat_is_64 else 20
+            fat_table_end = 8 + nfat_arch * arch_entry_size
+            accepted_ranges: List[Tuple[int, Tuple[int, int]]] = []
             slices_summary: List[Dict[str, Any]] = []
             for i in range(nfat_arch):
                 ent_off = 8 + i * arch_entry_size
@@ -1870,11 +2046,40 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                     "align_bytes": 1 << min(s_align, 30),
                 })
 
-                if s_offset + 28 <= file_size:
-                    actual_sz = min(s_size, file_size - s_offset)
-                    parsed_slice = _parse_macho_slice(data, i, s_offset, actual_sz)
-                    _enrich_slice_semantics_and_pedagogy(parsed_slice, data, file_size)
-                    slices_list.append(parsed_slice)
+                if s_offset + 28 > file_size:
+                    add_warning(fat_warnings, f"fat_slice_{i}_past_eof", f"Slice #{i} ({arch_short}) starts past the end of the file and was skipped.")
+                    continue
+                actual_sz = min(s_size, file_size - s_offset)
+                if actual_sz < 28:
+                    add_warning(fat_warnings, f"fat_slice_{i}_too_small", f"Slice #{i} ({arch_short}) is too small ({actual_sz} bytes) and was skipped.")
+                    continue
+                if s_offset < fat_table_end:
+                    add_warning(fat_warnings, f"fat_slice_{i}_overlaps_header", f"Slice #{i} ({arch_short}) overlaps the fat header and was skipped.")
+                    continue
+                # Overlapping slices are malformed; parsing each would multiply the work
+                # on the same bytes (up to nfat_arch times), so only the first is kept.
+                overlap = next(
+                    (j for j, (a, b) in accepted_ranges if s_offset < b and a < s_offset + actual_sz),
+                    None,
+                )
+                if overlap is not None:
+                    add_warning(fat_warnings, f"fat_slice_{i}_overlap", f"Slice #{i} ({arch_short}) overlaps slice #{overlap} and was skipped.")
+                    continue
+                slice_magic = struct.unpack_from("<I", data, s_offset)[0]
+                if slice_magic not in (MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64):
+                    add_warning(fat_warnings, f"fat_slice_{i}_not_macho", f"Slice #{i} ({arch_short}) does not start with a Mach-O magic (0x{slice_magic:08x}) and was skipped.")
+                    continue
+                accepted_ranges.append((i, (s_offset, s_offset + actual_sz)))
+                # slice_index is the position in `slices` (what the API's slice_index
+                # selects); fat_arch_index is the entry in the fat header table.
+                parsed_slice = _parse_macho_slice(data, len(slices_list), s_offset, actual_sz)
+                parsed_slice["fat_arch_index"] = i
+                _enrich_slice_semantics_and_pedagogy(parsed_slice, data, file_size)
+                slices_list.append(parsed_slice)
+
+            if not slices_list:
+                detail = "; ".join(w["message"] for w in fat_warnings) or "no slice entries"
+                raise BinaryFormatError(f"Universal (fat) binary contains no parseable Mach-O slices ({detail}).")
 
             fat_hdr_total = 8 + nfat_arch * arch_entry_size
             fat_header_obj = {
@@ -1887,10 +2092,11 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
                 "fields": fat_buf.get_fields(),
                 "slices_summary": slices_summary,
             }
+            annotate_fat_header_pedagogy(fat_header_obj)
 
     if not is_fat:
         if magic_le not in (MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64):
-            raise ValueError(
+            raise BinaryFormatError(
                 f"Unrecognized Mach-O magic 0x{magic_be:08x} in '{path}'. Expected Mach-O (0xFEEDFACF), Universal Fat (0xCAFEBABE), ELF (0x7F454C46), or Windows PE ('MZ')."
             )
         single_slice = _parse_macho_slice(data, 0, 0, file_size)
@@ -1908,6 +2114,7 @@ def parse_macho_bytes(data: bytes, path: str = "<memory>") -> Dict[str, Any]:
             "format_display": "Universal Mach-O" if is_fat else ("Mach-O 64" if slices_list[0]["header"]["is_64bit"] else "Mach-O 32"),
             "is_fat": is_fat,
             "fat_header": fat_header_obj,
+            "warnings": fat_warnings,
         },
         "slices": slices_list,
     }

@@ -1,0 +1,682 @@
+/*
+ * BinaryStudio - Labs: instruction encoding explorer and data representation playground.
+ * Everything is prefixed `lenc-` (encoding) or `lnum-` (numbers). Colours come from the core custom
+ * properties, so both themes follow automatically.
+ */
+
+.lenc-root,
+.lnum-root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-primary);
+  min-width: 0;
+  white-space: normal;
+}
+
+.lenc-controls,
+.lnum-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+}
+
+.lenc-field-label,
+.lnum-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.lenc-input,
+.lnum-input,
+.lenc-select,
+.lnum-select {
+  height: 26px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 0 8px;
+  outline: none;
+  min-width: 0;
+}
+.lenc-select,
+.lnum-select {
+  font-family: var(--font-sans);
+  padding: 0 4px;
+}
+.lenc-input:focus,
+.lnum-input:focus,
+.lenc-select:focus,
+.lnum-select:focus {
+  border-color: var(--border-focus);
+}
+.lenc-input-hex {
+  width: min(420px, 100%);
+}
+.lenc-grow {
+  flex: 1 1 260px;
+}
+.lenc-input-pc {
+  width: 170px;
+}
+.lnum-input-wide {
+  width: min(340px, 100%);
+}
+.lnum-input-mid {
+  width: 190px;
+}
+.lnum-input-small {
+  width: 110px;
+}
+.lnum-input.lnum-bad,
+.lenc-input.lenc-bad {
+  border-color: var(--danger-border);
+}
+
+.lenc-btn,
+.lnum-btn {
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lenc-btn:hover,
+.lnum-btn:hover {
+  background: var(--bg-hover);
+}
+.lenc-btn:disabled,
+.lnum-btn:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+.lenc-btn[aria-pressed="true"],
+.lnum-btn[aria-pressed="true"],
+.lnum-tab[aria-selected="true"] {
+  background: var(--bg-selected);
+  border-color: var(--border-focus);
+  color: var(--text-bright);
+}
+.lenc-btn:focus-visible,
+.lnum-btn:focus-visible,
+.lnum-tab:focus-visible,
+.lenc-bit:focus-visible,
+.lenc-flabel:focus-visible,
+.lenc-insn:focus-visible,
+.lnum-bit:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.lenc-note,
+.lnum-note {
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 96ch;
+}
+.lenc-error,
+.lnum-error {
+  color: var(--danger-fg);
+}
+.lenc-mono,
+.lnum-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- instruction list ---------------------------------------------------- */
+.lenc-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+.lenc-insn {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 4px 10px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--row-line);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.lenc-insn:last-child {
+  border-bottom: 0;
+}
+.lenc-insn:hover {
+  background: var(--bg-hover);
+}
+.lenc-insn[aria-current="true"] {
+  background: var(--bg-selected);
+}
+.lenc-insn-addr,
+.lenc-insn-bytes {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.lenc-insn-undecoded {
+  color: var(--danger-fg);
+}
+
+/* ---- breakdown ------------------------------------------------------------ */
+.lenc-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  min-width: 0;
+}
+.lenc-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.lenc-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.lenc-class {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.lenc-was {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--rw-fg);
+}
+.lenc-spacer {
+  flex: 1;
+}
+.lenc-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  min-width: 0;
+}
+.lenc-strip-wrap {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+/* AArch64: one 32-column grid */
+.lenc-a64 {
+  display: grid;
+  grid-template-columns: repeat(32, minmax(17px, 1fr));
+  gap: 2px 0;
+  min-width: 560px;
+  max-width: 860px;
+}
+/* x86: one block of 8 columns per byte */
+.lenc-x86 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+.lenc-byte {
+  display: grid;
+  grid-template-columns: repeat(8, 18px);
+  gap: 2px 0;
+}
+.lenc-bytehex {
+  grid-column: span 8;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-bright);
+  border-bottom: 1px solid var(--border-default);
+  margin: 0 1px;
+}
+.lenc-byteidx {
+  grid-column: span 8;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--text-muted);
+}
+
+.lenc-flabel {
+  min-width: 0;
+  height: 18px;
+  margin: 0 1px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: -0.02em;
+  line-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  cursor: pointer;
+}
+.lenc-bit {
+  height: 22px;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-right-width: 0;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lenc-bit.lenc-last {
+  border-right-width: 1px;
+  margin-right: 2px;
+}
+.lenc-bit:hover {
+  filter: var(--hover-filter);
+}
+.lenc-bit.lenc-changed {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  font-weight: 700;
+}
+.lenc-bitidx {
+  text-align: center;
+  font-size: 9px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lenc-membyte {
+  margin: 2px 1px 0;
+  padding: 1px 0;
+  border-top: 1px solid var(--border-default);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* field kinds */
+.lenc-k-opc { background: var(--hdr-bg); color: var(--hdr-fg); border-color: var(--hdr-border); }
+.lenc-k-reg { background: var(--rx-bg); color: var(--rx-fg); border-color: var(--rx-border); }
+.lenc-k-imm,
+.lenc-k-disp { background: var(--rw-bg); color: var(--rw-fg); border-color: var(--rw-border); }
+.lenc-k-cond { background: var(--cs-bg); color: var(--cs-fg); border-color: var(--cs-border); }
+.lenc-k-mod { background: var(--ro-bg); color: var(--ro-fg); border-color: var(--ro-border); }
+.lenc-k-unknown { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-border); }
+.lenc-k-fixed { background: var(--bg-elevated); color: var(--text-secondary); border-color: var(--border-default); }
+.lenc-bit.lenc-active,
+.lenc-flabel.lenc-active {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  color: var(--text-bright);
+}
+
+.lenc-fields {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.lenc-fields th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.lenc-fields td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--row-line);
+  vertical-align: top;
+}
+.lenc-fields tr.lenc-active td {
+  background: var(--tint-accent);
+}
+.lenc-fields tbody tr {
+  cursor: pointer;
+}
+.lenc-fname {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.lenc-fbits {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.lenc-fval {
+  width: 92px;
+  height: 22px;
+}
+.lenc-fmeaning {
+  line-height: 1.45;
+  min-width: 220px;
+}
+.lenc-steps,
+.lenc-notes {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.55;
+}
+.lenc-steps {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.lenc-notes {
+  color: var(--text-secondary);
+}
+.lenc-subhead {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.lenc-gap {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 10px;
+  line-height: 1.5;
+}
+.lenc-gap strong {
+  color: var(--danger-fg);
+}
+.lenc-target {
+  font-family: var(--font-mono);
+  color: var(--rx-fg);
+}
+
+/* inline panel inside the disassembly table */
+tr.lenc-inline-row > td {
+  padding: 6px 10px 10px;
+  background: var(--tint-learn);
+  white-space: normal;
+}
+.lenc-inline .lenc-root {
+  padding: 0;
+}
+
+/* ---- number lab ------------------------------------------------------------ */
+.lnum-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 8px;
+}
+.lnum-tab {
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.lnum-tab:hover {
+  color: var(--text-primary);
+}
+.lnum-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.lnum-bits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+.lnum-bytegroup {
+  display: grid;
+  grid-template-columns: repeat(8, 19px);
+  gap: 2px 0;
+}
+.lnum-bit {
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-right-width: 0;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lnum-bit:last-of-type {
+  border-right-width: 1px;
+}
+.lnum-bit[aria-pressed="true"] {
+  font-weight: 700;
+}
+.lnum-bit.lnum-f-sign { background: var(--cs-bg); color: var(--cs-fg); border-color: var(--cs-border); }
+.lnum-bit.lnum-f-exp { background: var(--ro-bg); color: var(--ro-fg); border-color: var(--ro-border); }
+.lnum-bit.lnum-f-mant { background: var(--rx-bg); color: var(--rx-fg); border-color: var(--rx-border); }
+.lnum-bit.lnum-msb { background: var(--cs-bg); color: var(--cs-fg); border-color: var(--cs-border); }
+.lnum-bytecap {
+  grid-column: span 8;
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+.lnum-bytehex {
+  grid-column: span 8;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.lnum-kv {
+  display: grid;
+  grid-template-columns: minmax(150px, max-content) 1fr;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.lnum-kv > div {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--row-line);
+  min-width: 0;
+}
+.lnum-kv > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.lnum-k {
+  color: var(--text-secondary);
+}
+.lnum-v {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.lnum-v .lnum-dim,
+.lnum-dim {
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+}
+.lnum-table {
+  border-collapse: collapse;
+  font-size: 11.5px;
+  width: 100%;
+}
+.lnum-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.lnum-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--row-line);
+  font-family: var(--font-mono);
+  vertical-align: middle;
+}
+.lnum-table td.lnum-text {
+  font-family: var(--font-sans);
+}
+.lnum-table .lnum-input {
+  width: 100%;
+  min-width: 80px;
+  height: 22px;
+}
+.lnum-addr-table td {
+  padding: 3px 4px;
+}
+.lnum-addr-table td:first-child {
+  padding-left: 8px;
+}
+.lnum-addr-table .lnum-input {
+  min-width: 96px;
+  padding: 0 6px;
+}
+.lnum-rownotes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  font-size: 11.5px;
+}
+.lnum-tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--bg-panel);
+}
+.lnum-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.lnum-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+.lnum-chip.lnum-f-sign { background: var(--cs-bg); color: var(--cs-fg); border-color: var(--cs-border); }
+.lnum-chip.lnum-f-exp { background: var(--ro-bg); color: var(--ro-fg); border-color: var(--ro-border); }
+.lnum-chip.lnum-f-mant { background: var(--rx-bg); color: var(--rx-fg); border-color: var(--rx-border); }
+.lnum-flags {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 2px 16px;
+}
+.lnum-flag {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  min-width: 0;
+}
+.lnum-flag input {
+  margin: 0;
+  align-self: center;
+}
+.lnum-flag-name {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.lnum-flag-mask {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.lnum-flag.lnum-on .lnum-flag-name {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+.lnum-steps {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.6;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.lnum-status {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 3px;
+  border: 1px solid var(--ro-border);
+  background: var(--ro-bg);
+  color: var(--ro-fg);
+  font-family: var(--font-mono);
+}
+.lnum-status.lnum-warn {
+  border-color: var(--rw-border);
+  background: var(--rw-bg);
+  color: var(--rw-fg);
+}
+.lnum-status.lnum-bad {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.lnum-h {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+@media (max-width: 760px) {
+  .lenc-insn {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .lnum-kv {
+    grid-template-columns: 1fr;
+  }
+  .lnum-kv > div.lnum-k {
+    border-bottom: 0;
+    padding-bottom: 0;
+  }
+  .lnum-flags {
+    grid-template-columns: 1fr;
+  }
+}
